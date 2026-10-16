@@ -22,15 +22,17 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kinetik Weather")]
 [assembly: AssemblyProduct("Kinetik Weather")]
 [assembly: AssemblyCopyright("Copyright © 2026 Akila Sella Hennedige")]
-[assembly: AssemblyVersion("1.0.2.0")]
-[assembly: AssemblyFileVersion("1.0.2.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 static class Program
 {
-    public const string Version = "1.0.2";
+    public const string Version = "1.1.0";
     // --demo: a made-up forecast, nothing fetched, read from or saved to this PC. "--theme Name" picks its theme.
-    // "--shot file.png" draws the demo card into a PNG and quits (for the README screenshots).
+    // "--shot file.png" draws the demo card into a PNG and quits (for the README screenshots). "--view 0|1|2" picks how
+    // the demo's four places are shown (see Settings.View).
     public static bool Demo;
+    public static int DemoView = 1;
     public static string DemoTheme, ShotPath, DemoPlace; // DemoPlace: "lat,lon" fetched live instead of the made-up forecast
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
 
@@ -44,6 +46,8 @@ static class Program
         if (si >= 0 && si + 1 < args.Length) { ShotPath = Path.GetFullPath(args[si + 1]); Demo = true; }
         int pi = Array.IndexOf(args, "--place");
         if (pi >= 0 && pi + 1 < args.Length) DemoPlace = args[pi + 1];
+        int vi = Array.IndexOf(args, "--view");
+        if (vi >= 0 && vi + 1 < args.Length) int.TryParse(args[vi + 1], out DemoView);
         bool created;
         using (new Mutex(true, Demo ? @"Local\KinetikWeatherDemo" + (ShotPath != null ? Guid.NewGuid().ToString("N") : "") : @"Local\KinetikWeather", out created))
         {
@@ -71,12 +75,45 @@ class Settings
     public int X = int.MinValue, Y = int.MinValue, Width = 340, Scale = 100, Opacity = CommonMenu.DefaultOpacity, Layer = 0;
     public int Hours = 12, Days = 5, Refresh = 30, Wind = Metric ? 0 : 1; // Wind: 0 km/h, 1 mph, 2 m/s
     public bool Locked, Snap = true, ClickThrough, Fahrenheit = !Metric;
-    public bool ShowHourly = true, ShowRain = true, ShowSun = true, ShowDaily = true;
+    public bool ShowHourly = true, ShowRain = true, ShowSun = true, ShowDaily = true, ShowDetails = true;
+    public int View = 1; // 0 just the main place, 1 the main place in full with the others as rows below, 2 every place as a row
     public bool Use24h = CultureInfo.CurrentCulture.DateTimeFormat.ShortTimePattern.Contains("H");
     public string ThemeName = "Midnight", FontName = ""; // "" = Segoe UI Variable Text
-    public string Place = "", Lat = "", Lon = "";        // Lat/Lon as invariant-culture decimals
+    public string Place = "", Lat = "", Lon = "";        // the main place; Lat/Lon as invariant-culture decimals
+    public string Others = "";                           // the other places, "Name|lat|lon" joined by ";"
 
     public bool HasPlace { get { return Lat != "" && Lon != ""; } }
+    public Place Main { get { return new Place { Name = Place == "" ? "Weather" : Place, Lat = Lat, Lon = Lon }; } }
+
+    public List<Place> OtherPlaces()
+    {
+        var list = new List<Place>();
+        foreach (var part in (Others ?? "").Split(';'))
+        {
+            var f = part.Split('|');
+            double a, b;
+            if (f.Length != 3 || !double.TryParse(f[1], NumberStyles.Float, CultureInfo.InvariantCulture, out a) || !double.TryParse(f[2], NumberStyles.Float, CultureInfo.InvariantCulture, out b)
+                || Math.Abs(a) > 90 || Math.Abs(b) > 180) continue;
+            var p = new Place { Name = f[0].Trim() == "" ? f[1] + ", " + f[2] : f[0].Trim(), Lat = f[1], Lon = f[2] };
+            if (p.Key != Main.Key && !list.Any(o => o.Key == p.Key)) list.Add(p);
+        }
+        return list;
+    }
+
+    public void SetOthers(IEnumerable<Place> places)
+    {
+        Others = string.Join(";", places.Select(p => p.Name.Replace("|", " ").Replace(";", " ").Trim() + "|" + p.Lat + "|" + p.Lon));
+    }
+
+    // The main place first, then the others; empty until a place is set.
+    public List<Place> AllPlaces()
+    {
+        var all = new List<Place>();
+        if (!HasPlace) return all;
+        all.Add(Main);
+        all.AddRange(OtherPlaces());
+        return all;
+    }
 
     static IEnumerable<FieldInfo> Fields
     {
@@ -97,7 +134,8 @@ class Settings
             return new Settings
             {
                 Layer = 2, ThemeName = Program.DemoTheme ?? "Midnight", X = 240, Y = 160,
-                Place = "Melbourne", Lat = "-37.81", Lon = "144.96", Fahrenheit = false, Wind = 0, Use24h = false
+                Place = "Melbourne", Lat = "-37.81", Lon = "144.96", Fahrenheit = false, Wind = 0, Use24h = false,
+                Others = "Sydney|-33.87|151.21;Tokyo|35.68|139.69;London|51.51|-0.13", View = Math.Max(0, Math.Min(2, Program.DemoView))
             };
         Settings s = null;
         for (int attempt = 0; attempt < 4; attempt++)
@@ -137,7 +175,7 @@ class Settings
                     }
         }
         catch { ok = false; }
-        KinetikSuite.SettingsValidation.Sanitize(s); return s;
+        KinetikSuite.SettingsValidation.Sanitize(s); s.View = Math.Max(0, Math.Min(2, s.View)); return s;
     }
 
     public void Save()
@@ -162,7 +200,8 @@ class Settings
 
 // ======================================================================= Forecast data (Open-Meteo)
 class Hour { public DateTime T; public double Temp, Pop; public int Code; public bool Day; }
-class DayF { public DateTime Date, Rise, Set; public double Max, Min, Pop; public int Code; }
+class DayF { public DateTime Date, Rise, Set; public double Max, Min, Pop, Uv = double.NaN; public int Code; }
+class Place { public string Name, Lat, Lon; public string Key { get { return Lat + "," + Lon; } } }
 
 class Forecast
 {
@@ -185,7 +224,7 @@ static class Weather
         return "https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon +
             "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m" +
             "&hourly=temperature_2m,precipitation_probability,weather_code,is_day" +
-            "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset" +
+            "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset,uv_index_max" +
             "&timezone=auto&forecast_days=8";
     }
 
@@ -233,10 +272,10 @@ static class Weather
 
         var d = Obj(root, "daily");
         object[] dt = Arr(d, "time"), dc = Arr(d, "weather_code"), mx = Arr(d, "temperature_2m_max"), mn = Arr(d, "temperature_2m_min"),
-                 dp = Arr(d, "precipitation_probability_max"), rise = Arr(d, "sunrise"), set = Arr(d, "sunset");
+                 dp = Arr(d, "precipitation_probability_max"), rise = Arr(d, "sunrise"), set = Arr(d, "sunset"), uv = Arr(d, "uv_index_max");
         for (int i = 0; i < dt.Length; i++)
         {
-            var x = new DayF { Date = Time(dt[i]), Code = I(dc, i), Max = D(mx, i), Min = D(mn, i), Pop = D(dp, i) };
+            var x = new DayF { Date = Time(dt[i]), Code = I(dc, i), Max = D(mx, i), Min = D(mn, i), Pop = D(dp, i), Uv = D(uv, i) };
             try { x.Rise = Time(rise[i]); x.Set = Time(set[i]); } catch { } // polar day or night has none
             f.Days.Add(x);
         }
@@ -281,35 +320,55 @@ static class Weather
         return new Spot { Name = t, Label = t + " (coordinates)", Lat = la.ToString("0.####", Inv), Lon = lo.ToString("0.####", Inv) };
     }
 
-    // ---- the last forecast, kept so the widget fills in at once at startup and keeps working offline
-    static string CacheFile
+    // ---- the last forecasts, kept so the widget fills in at once at startup and keeps working offline. The main place's
+    // is forecast.json (Kinetik Screen reads it); the others are in places\<lat>_<lon>.json, listed in places.tsv.
+    static string Folder { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KinetikWeather"); } }
+    static string CacheFile(string lat, string lon, bool main)
     {
-        get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KinetikWeather", "forecast.json"); }
+        return main ? Path.Combine(Folder, "forecast.json") : Path.Combine(Folder, "places", (lat + "_" + lon).Replace("-", "m") + ".json");
     }
 
-    public static void SaveCache(string lat, string lon, string json)
+    public static void SaveCache(string lat, string lon, string json, bool main)
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(CacheFile));
-            File.WriteAllText(CacheFile, lat + "," + lon + "\n" + json);
+            var file = CacheFile(lat, lon, main);
+            Directory.CreateDirectory(Path.GetDirectoryName(file));
+            File.WriteAllText(file, lat + "," + lon + "\n" + json);
         }
         catch { }
     }
 
-    public static Forecast LoadCache(string lat, string lon)
+    public static Forecast LoadCache(string lat, string lon, bool main, out string json)
+    {
+        json = null;
+        try
+        {
+            var file = CacheFile(lat, lon, main);
+            if (!File.Exists(file)) return null;
+            var text = File.ReadAllText(file);
+            int nl = text.IndexOf('\n');
+            if (nl < 0 || text.Substring(0, nl) != lat + "," + lon) return null;
+            json = text.Substring(nl + 1);
+            var f = Parse(json);
+            f.Fetched = File.GetLastWriteTimeUtc(file);
+            return f;
+        }
+        catch { json = null; return null; }
+    }
+
+    // One line per place, the main one first: name, latitude, longitude and its forecast file, tab-separated.
+    public static void SaveIndex(List<Place> places)
     {
         try
         {
-            if (!File.Exists(CacheFile)) return null;
-            var text = File.ReadAllText(CacheFile);
-            int nl = text.IndexOf('\n');
-            if (nl < 0 || text.Substring(0, nl) != lat + "," + lon) return null;
-            var f = Parse(text.Substring(nl + 1));
-            f.Fetched = File.GetLastWriteTimeUtc(CacheFile);
-            return f;
+            Directory.CreateDirectory(Folder);
+            var lines = places.Select((p, i) => p.Name.Replace("\t", " ") + "\t" + p.Lat + "\t" + p.Lon + "\t" + CacheFile(p.Lat, p.Lon, i == 0));
+            var file = Path.Combine(Folder, "places.tsv");
+            var text = string.Join("\r\n", lines);
+            if (!File.Exists(file) || File.ReadAllText(file) != text) File.WriteAllText(file, text);
         }
-        catch { return null; }
+        catch { }
     }
 
     // ---- WMO weather codes
@@ -350,18 +409,22 @@ static class Weather
         return n[(int)Math.Round(((deg % 360) + 360) % 360 / 45) % 8];
     }
 
-    // A made-up forecast for --demo: a mild spring day with showers in the afternoon.
-    public static Forecast Demo()
+    // A made-up forecast for --demo: a mild spring day with showers in the afternoon. Other variants are warmer, cooler
+    // or wetter, and some are in another time zone, for the demo's other places.
+    public static Forecast Demo(int variant = 0)
     {
-        var f = new Forecast { Temp = 18.4, Feels = 17.1, Humidity = 62, Wind = 14, WindDir = 320, Code = 2, IsDay = true, Fetched = DateTime.UtcNow.AddMinutes(-6) };
-        f.Offset = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalSeconds;
+        int v = variant % 4;
+        double[] shift = { 0, 4, -3, -8 }; int[] codeNow = { 2, 0, 61, 3 }; int[] zone = { 0, 0, -2, -11 };
+        var f = new Forecast { Temp = 18.4 + shift[v], Feels = 17.1 + shift[v], Humidity = 62 + v * 6, Wind = 14 + v * 3, WindDir = 320 - v * 70, Code = codeNow[v], IsDay = true, Fetched = DateTime.UtcNow.AddMinutes(-6) };
+        f.Offset = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalSeconds + zone[v] * 3600;
+        f.IsDay = f.PlaceNow.Hour >= 6 && f.PlaceNow.Hour < 20;
         var now = f.PlaceNow;
         var start = now.Date;
         for (int i = 0; i < 24 * 8; i++)
         {
             var t = start.AddHours(i);
             double hr = t.Hour + 0;
-            double temp = 14 + 6 * Math.Sin((hr - 9) / 24 * 2 * Math.PI) + (i / 24) * 0.6;
+            double temp = 14 + shift[v] + 6 * Math.Sin((hr - 9) / 24 * 2 * Math.PI) + (i / 24) * 0.6;
             double since = (t - now).TotalHours;
             double pop = since > 2 && since < 9 ? Math.Max(0, 70 - Math.Abs(since - 5) * 18) : 5 + (i * 37 % 11);
             int code = pop >= 50 ? 80 : pop >= 25 ? 3 : (t.Hour > 7 && t.Hour < 18 ? 2 : 1);
@@ -370,31 +433,36 @@ static class Weather
         int[] codes = { 80, 61, 3, 1, 2, 0, 95, 2 };
         double[] max = { 21, 17, 16, 19, 23, 26, 22, 20 }, min = { 11, 10, 9, 8, 12, 14, 15, 12 }, pops = { 70, 85, 30, 5, 10, 0, 60, 15 };
         for (int i = 0; i < 8; i++)
-            f.Days.Add(new DayF { Date = start.AddDays(i), Code = codes[i], Max = max[i], Min = min[i], Pop = pops[i], Rise = start.AddDays(i).AddHours(6).AddMinutes(24 - i), Set = start.AddDays(i).AddHours(19).AddMinutes(41 + i) });
+            f.Days.Add(new DayF { Date = start.AddDays(i), Code = codes[(i + v * 3) % 8], Max = max[i] + shift[v], Min = min[i] + shift[v], Pop = pops[(i + v * 3) % 8], Uv = 7 - i % 4 + v, Rise = start.AddDays(i).AddHours(6).AddMinutes(24 - i), Set = start.AddDays(i).AddHours(19).AddMinutes(41 + i) });
         return f;
     }
 }
 
 // ======================================================================= Weather icons, drawn rather than bitmaps so they're sharp at any size
+// Soft gradients normally. With Mono set (the terminal themes) they're line drawings in that one colour, the clouds
+// filled with MonoBg so whatever is behind them stays hidden.
 static class WxIcon
 {
     public static readonly Color Sun = Color.FromArgb(255, 196, 64), Rain = Color.FromArgb(77, 166, 255), Bolt = Color.FromArgb(255, 214, 90);
+    public static Color Mono = Color.Empty, MonoBg = Color.Black;
 
     public static void Paint(Graphics g, RectangleF r, int code, bool day, bool light)
     {
         float s = Math.Min(r.Width, r.Height), x = r.X + (r.Width - s) / 2, y = r.Y + (r.Height - s) / 2;
-        Color cloud = light ? Color.FromArgb(160, 168, 184) : Color.FromArgb(214, 220, 232);
-        Color cloudDark = light ? Color.FromArgb(112, 120, 138) : Color.FromArgb(150, 158, 178);
-        Color snow = light ? Color.FromArgb(120, 160, 215) : Color.FromArgb(236, 242, 255);
+        bool mono = !Mono.IsEmpty;
+        Color cloud = mono ? Mono : light ? Color.FromArgb(160, 168, 184) : Color.FromArgb(226, 231, 241);
+        Color cloudDark = mono ? Mono : light ? Color.FromArgb(112, 120, 138) : Color.FromArgb(150, 158, 178);
+        Color snow = mono ? Mono : light ? Color.FromArgb(120, 160, 215) : Color.FromArgb(236, 242, 255);
+        Color rain = mono ? Mono : Rain, bolt = mono ? Mono : Bolt;
 
         if (code == 0) { Orb(g, x + s / 2, y + s / 2, s * 0.24f, day, s, light); return; }
-        if (code == 1) { Orb(g, x + s * 0.44f, y + s * 0.44f, s * 0.22f, day, s, light); Cloud(g, new RectangleF(x + s * 0.42f, y + s * 0.56f, s * 0.5f, s * 0.32f), cloud); return; }
-        if (code == 2) { Orb(g, x + s * 0.36f, y + s * 0.36f, s * 0.2f, day, s, light); Cloud(g, new RectangleF(x + s * 0.22f, y + s * 0.4f, s * 0.7f, s * 0.44f), cloud); return; }
-        if (code == 3) { Cloud(g, new RectangleF(x + s * 0.3f, y + s * 0.18f, s * 0.6f, s * 0.38f), cloudDark); Cloud(g, new RectangleF(x + s * 0.08f, y + s * 0.34f, s * 0.78f, s * 0.48f), cloud); return; }
+        if (code == 1) { Orb(g, x + s * 0.44f, y + s * 0.44f, s * 0.22f, day, s, light); Cloud(g, new RectangleF(x + s * 0.42f, y + s * 0.56f, s * 0.5f, s * 0.32f), cloud, s); return; }
+        if (code == 2) { Orb(g, x + s * 0.36f, y + s * 0.36f, s * 0.2f, day, s, light); Cloud(g, new RectangleF(x + s * 0.22f, y + s * 0.4f, s * 0.7f, s * 0.44f), cloud, s); return; }
+        if (code == 3) { Cloud(g, new RectangleF(x + s * 0.3f, y + s * 0.18f, s * 0.6f, s * 0.38f), cloudDark, s); Cloud(g, new RectangleF(x + s * 0.08f, y + s * 0.34f, s * 0.78f, s * 0.48f), cloud, s); return; }
         if (code == 45 || code == 48)
         {
-            Cloud(g, new RectangleF(x + s * 0.12f, y + s * 0.12f, s * 0.76f, s * 0.46f), cloud);
-            using (var pen = new Pen(cloudDark, s * 0.065f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            Cloud(g, new RectangleF(x + s * 0.12f, y + s * 0.12f, s * 0.76f, s * 0.46f), cloud, s);
+            using (var pen = new Pen(cloudDark, s * (mono ? 0.05f : 0.065f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
             {
                 g.DrawLine(pen, x + s * 0.16f, y + s * 0.7f, x + s * 0.84f, y + s * 0.7f);
                 g.DrawLine(pen, x + s * 0.26f, y + s * 0.84f, x + s * 0.74f, y + s * 0.84f);
@@ -405,13 +473,13 @@ static class WxIcon
         bool thunder = code >= 95;
         bool snowy = (code >= 71 && code <= 77) || code == 85 || code == 86;
         if (showers) Orb(g, x + s * 0.3f, y + s * 0.3f, s * 0.17f, day, s, light);
-        Cloud(g, new RectangleF(x + s * 0.12f, y + s * (showers ? 0.24f : 0.1f), s * 0.76f, s * 0.46f), thunder ? cloudDark : cloud);
+        Cloud(g, new RectangleF(x + s * 0.12f, y + s * (showers ? 0.24f : 0.1f), s * 0.76f, s * 0.46f), thunder ? cloudDark : cloud, s);
         float top = y + s * (showers ? 0.72f : 0.62f);
         if (thunder)
         {
             var p = new[] { new PointF(x + s * 0.54f, top - s * 0.06f), new PointF(x + s * 0.38f, top + s * 0.17f), new PointF(x + s * 0.5f, top + s * 0.17f),
                             new PointF(x + s * 0.42f, top + s * 0.34f), new PointF(x + s * 0.64f, top + s * 0.1f), new PointF(x + s * 0.52f, top + s * 0.1f), new PointF(x + s * 0.6f, top - s * 0.06f) };
-            using (var b = new SolidBrush(Bolt)) g.FillPolygon(b, p);
+            using (var b = new SolidBrush(bolt)) g.FillPolygon(b, p);
             return;
         }
         int n = code == 51 || code == 61 || code == 71 || code == 80 || code == 85 ? 2 : 3;
@@ -422,7 +490,7 @@ static class WxIcon
             if (snowy)
                 using (var b = new SolidBrush(snow)) g.FillEllipse(b, dx - s * 0.05f, dy, s * 0.1f, s * 0.1f);
             else
-                using (var pen = new Pen(Rain, s * 0.07f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                using (var pen = new Pen(rain, s * 0.07f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                     g.DrawLine(pen, dx + s * 0.04f, dy, dx - s * 0.03f, dy + (code >= 51 && code <= 57 ? s * 0.08f : s * 0.16f));
         }
     }
@@ -430,16 +498,24 @@ static class WxIcon
     // The sun (with rays when there's room) or a crescent moon.
     static void Orb(Graphics g, float cx, float cy, float rad, bool day, float s, bool light)
     {
+        bool mono = !Mono.IsEmpty;
         if (day)
         {
-            using (var b = new SolidBrush(Sun)) g.FillEllipse(b, cx - rad, cy - rad, rad * 2, rad * 2);
+            var disc = new RectangleF(cx - rad, cy - rad, rad * 2, rad * 2);
+            if (mono)
+                using (var pen = new Pen(Mono, Math.Max(1, s * 0.05f))) g.DrawEllipse(pen, disc);
+            else
+            {
+                using (var halo = new SolidBrush(Color.FromArgb(40, Sun))) g.FillEllipse(halo, RectangleF.Inflate(disc, rad * 0.35f, rad * 0.35f));
+                using (var b = new LinearGradientBrush(RectangleF.Inflate(disc, 1, 1), Color.FromArgb(255, 222, 110), Color.FromArgb(255, 160, 40), 60f)) g.FillEllipse(b, disc);
+            }
             if (s >= 18)
-                using (var pen = new Pen(Sun, Math.Max(1, s * 0.05f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                using (var pen = new Pen(mono ? Mono : Sun, Math.Max(1, s * 0.05f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                     for (int i = 0; i < 8; i++)
                     {
                         double a = i * Math.PI / 4;
                         float c = (float)Math.Cos(a), sn = (float)Math.Sin(a);
-                        g.DrawLine(pen, cx + c * rad * 1.4f, cy + sn * rad * 1.4f, cx + c * rad * 1.75f, cy + sn * rad * 1.75f);
+                        g.DrawLine(pen, cx + c * rad * 1.45f, cy + sn * rad * 1.45f, cx + c * rad * 1.8f, cy + sn * rad * 1.8f);
                     }
             return;
         }
@@ -452,12 +528,13 @@ static class WxIcon
             p.AddArc(cx - R, cy - R, 2 * R, 2 * R, axis + alpha, 360 - 2 * alpha);
             p.AddArc(ox - R, oy - R, 2 * R, 2 * R, axis + 180 + alpha, -2 * alpha);
             p.CloseFigure();
-            using (var b = new SolidBrush(light ? Color.FromArgb(150, 160, 190) : Color.FromArgb(222, 226, 240))) g.FillPath(b, p);
+            if (mono) using (var pen = new Pen(Mono, Math.Max(1, s * 0.05f))) g.DrawPath(pen, p);
+            else using (var b = new SolidBrush(light ? Color.FromArgb(150, 160, 190) : Color.FromArgb(222, 226, 240))) g.FillPath(b, p);
         }
     }
 
     // A cloud filling r: three bumps on a rounded base.
-    static void Cloud(Graphics g, RectangleF r, Color col)
+    static void Cloud(Graphics g, RectangleF r, Color col, float s)
     {
         using (var p = new GraphicsPath { FillMode = FillMode.Winding })
         {
@@ -466,12 +543,29 @@ static class WxIcon
             p.AddEllipse(r.X + w * 0.12f, r.Y + h * 0.28f, h * 0.62f, h * 0.62f);
             p.AddEllipse(r.X + w * 0.32f, r.Y, h * 0.86f, h * 0.86f);
             p.AddEllipse(r.X + w * 0.6f, r.Y + h * 0.3f, h * 0.58f, h * 0.58f);
-            using (var b = new SolidBrush(col)) g.FillPath(b, p);
+            if (!Mono.IsEmpty)
+            {
+                // the union's outline: fill it with the background, then trace it by widening
+                using (var b = new SolidBrush(MonoBg)) g.FillPath(b, p);
+                using (var region = new Region(p))
+                using (var pen = new Pen(col, Math.Max(1, s * 0.05f) * 2))
+                using (var clip = g.Clip)
+                {
+                    g.SetClip(region, CombineMode.Exclude);
+                    using (var wide = (GraphicsPath)p.Clone()) { wide.Widen(pen); using (var b = new SolidBrush(col)) g.FillPath(b, wide); }
+                    g.Clip = clip;
+                }
+                return;
+            }
+            using (var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, w, h + 2), col, Draw.Mix(col, Color.FromArgb(120, 130, 150), 0.28f), 90f)) g.FillPath(b, p);
         }
     }
 }
 
 // ======================================================================= The widget
+// One card. The main place can be shown in full (a big temperature, details, the next hours as a curve, the sun and
+// the days ahead) and the other places as compact rows under it; or every place as a compact row. Clicking a row
+// makes that place the main one.
 class WeatherForm : Form
 {
     [StructLayout(LayoutKind.Sequential)] struct WINDOWPOS { public IntPtr hwnd, hwndInsertAfter; public int x, y, cx, cy; public uint flags; }
@@ -479,6 +573,8 @@ class WeatherForm : Form
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
     [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
+
+    const int MaxPlaces = 8;
 
     readonly Settings c = Settings.Load();
     readonly DibSurface surface = new DibSurface();
@@ -490,8 +586,16 @@ class WeatherForm : Form
     bool dragging, moved, fetching;
     Point grab, downAt;
     ThemePicker picker;
-    Forecast data;
-    string lastError;
+    string lastError; // the main place's last fetch error, or null
+
+    // Every place's forecast and the JSON it came from, by "lat,lon"; and the error from the last try for any that failed.
+    readonly Dictionary<string, Forecast> got = new Dictionary<string, Forecast>();
+    readonly Dictionary<string, string> raw = new Dictionary<string, string>();
+    readonly Dictionary<string, string> errs = new Dictionary<string, string>();
+    // Where each compact row was drawn (window coordinates), for clicks.
+    readonly List<KeyValuePair<RectangleF, Place>> rowHits = new List<KeyValuePair<RectangleF, Place>>();
+
+    Forecast data { get { Forecast f; return c.HasPlace && got.TryGetValue(c.Main.Key, out f) ? f : null; } }
 
     public WeatherForm()
     {
@@ -513,12 +617,22 @@ class WeatherForm : Form
         if (Program.Demo && Program.DemoPlace != null)
         {
             var sp = Weather.ParseCoords(Program.DemoPlace);
-            if (sp != null) { c.Lat = sp.Lat; c.Lon = sp.Lon; c.Place = "Live demo"; }
-            try { data = Weather.Parse(Weather.Get(Weather.Url(c.Lat, c.Lon))); data.Fetched = DateTime.UtcNow; }
+            if (sp != null) { c.Lat = sp.Lat; c.Lon = sp.Lon; c.Place = "Live demo"; c.Others = ""; }
+            try { var f = Weather.Parse(Weather.Get(Weather.Url(c.Lat, c.Lon))); f.Fetched = DateTime.UtcNow; got[c.Main.Key] = f; }
             catch (Exception ex) { lastError = Friendly(ex); }
         }
-        else if (Program.Demo) data = Weather.Demo();
-        else if (c.HasPlace) data = Weather.LoadCache(c.Lat, c.Lon);
+        else if (Program.Demo)
+        {
+            int i = 0;
+            foreach (var p in c.AllPlaces()) got[p.Key] = Weather.Demo(i++);
+        }
+        else
+            foreach (var p in c.AllPlaces())
+            {
+                string json;
+                var f = Weather.LoadCache(p.Lat, p.Lon, p.Key == c.Main.Key, out json);
+                if (f != null) { got[p.Key] = f; raw[p.Key] = json; }
+            }
 
         SystemEvents.SessionSwitch += OnSession;
         SystemEvents.PowerModeChanged += OnPower;
@@ -549,10 +663,24 @@ class WeatherForm : Form
     void OnNetwork(object s, System.Net.NetworkInformation.NetworkAvailabilityEventArgs e)
     {
         if (!e.IsAvailable) return;
-        try { BeginInvoke((Action)(() => { if (lastError != null || Stale) ScheduleFetchSeconds(5); })); } catch { }
+        try { BeginInvoke((Action)(() => { if (lastError != null || errs.Count > 0 || Stale) ScheduleFetchSeconds(5); })); } catch { }
     }
 
-    bool Stale { get { return data == null || (DateTime.UtcNow - data.Fetched).TotalMinutes >= c.Refresh; } }
+    // Old when any place has no forecast yet, or the oldest one is due for a refresh.
+    bool Stale
+    {
+        get
+        {
+            foreach (var p in c.AllPlaces())
+            {
+                Forecast f;
+                if (!got.TryGetValue(p.Key, out f) || (DateTime.UtcNow - f.Fetched).TotalMinutes >= c.Refresh) return true;
+            }
+            return false;
+        }
+    }
+
+    DateTime OldestFetch { get { var all = c.AllPlaces().Where(p => got.ContainsKey(p.Key)).Select(p => got[p.Key].Fetched).ToList(); return all.Count == 0 ? DateTime.MinValue : all.Min(); } }
 
     protected override CreateParams CreateParams
     {
@@ -586,9 +714,10 @@ class WeatherForm : Form
         if (Program.ShotPath != null) { BeginInvoke((Action)SaveShot); return; }
         if (!Program.Demo)
         {
+            WriteIndex();
             if (!c.HasPlace) BeginInvoke((Action)ChoosePlace);
             else if (Stale) Fetch();
-            else ScheduleFetchSeconds((int)Math.Max(5, c.Refresh * 60 - (DateTime.UtcNow - data.Fetched).TotalSeconds));
+            else ScheduleFetchSeconds((int)Math.Max(5, c.Refresh * 60 - (DateTime.UtcNow - OldestFetch).TotalSeconds));
         }
     }
 
@@ -626,7 +755,7 @@ class WeatherForm : Form
         tick.Start();
     }
 
-    // ---- fetching
+    // ---- fetching: every place in turn, on a worker thread
     void ScheduleFetchSeconds(int seconds)
     {
         if (Program.Demo) return;
@@ -640,28 +769,55 @@ class WeatherForm : Form
         if (Program.Demo || !c.HasPlace || fetching) return;
         fetching = true;
         fetchTimer.Stop();
-        string lat = c.Lat, lon = c.Lon;
+        var places = c.AllPlaces();
         if (data == null) Render();
         ThreadPool.QueueUserWorkItem(_ =>
         {
-            Forecast f = null; string json = null, err = null;
-            try { json = Weather.Get(Weather.Url(lat, lon)); f = Weather.Parse(json); f.Fetched = DateTime.UtcNow; }
-            catch (Exception ex) { err = Friendly(ex); }
+            var results = new List<Tuple<Place, Forecast, string, string>>();
+            foreach (var p in places)
+            {
+                Forecast f = null; string json = null, err = null;
+                try { json = Weather.Get(Weather.Url(p.Lat, p.Lon)); f = Weather.Parse(json); f.Fetched = DateTime.UtcNow; }
+                catch (Exception ex) { err = Friendly(ex); }
+                results.Add(Tuple.Create(p, f, json, err));
+            }
             try
             {
                 BeginInvoke((Action)(() =>
                 {
                     fetching = false;
-                    if (lat != c.Lat || lon != c.Lon) { Fetch(); return; } // the place changed meanwhile
-                    if (f != null) { data = f; lastError = null; Weather.SaveCache(lat, lon, json); }
-                    else lastError = err;
-                    ScheduleFetchSeconds(f != null ? c.Refresh * 60 : Math.Min(5, c.Refresh) * 60);
+                    foreach (var r in results)
+                    {
+                        var key = r.Item1.Key;
+                        if (r.Item2 != null) { got[key] = r.Item2; raw[key] = r.Item3; errs.Remove(key); }
+                        else errs[key] = r.Item4;
+                    }
+                    SaveCaches();
+                    var main = c.HasPlace ? c.Main.Key : "";
+                    lastError = errs.ContainsKey(main) ? errs[main] : null;
+                    // a place added while this ran gets its turn straight away
+                    if (c.AllPlaces().Any(p => !got.ContainsKey(p.Key) && !errs.ContainsKey(p.Key))) { Fetch(); return; }
+                    ScheduleFetchSeconds(errs.Count == 0 ? c.Refresh * 60 : Math.Min(5, c.Refresh) * 60);
                     Render();
                 }));
             }
             catch { }
         });
     }
+
+    // The main place's forecast goes to forecast.json (Kinetik Screen reads it); the others go beside it, listed in places.tsv.
+    void SaveCaches()
+    {
+        if (Program.Demo) return;
+        foreach (var p in c.AllPlaces())
+        {
+            string json;
+            if (raw.TryGetValue(p.Key, out json)) Weather.SaveCache(p.Lat, p.Lon, json, p.Key == c.Main.Key);
+        }
+        WriteIndex();
+    }
+
+    void WriteIndex() { if (!Program.Demo) Weather.SaveIndex(c.AllPlaces()); }
 
     public static string Friendly(Exception ex)
     {
@@ -677,7 +833,7 @@ class WeatherForm : Form
         return ex.Message;
     }
 
-    // ---- mouse: drag to move, double-click for the radar map, right-click for the menu
+    // ---- mouse: drag to move, click a place's row to show it in full, double-click for the radar map, right-click for the menu
     protected override void OnMouseDown(MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Left)
@@ -698,6 +854,8 @@ class WeatherForm : Form
             SetWindowPos(Handle, IntPtr.Zero, p.X, p.Y, 0, 0, 0x1 | 0x4 | 0x10); // NOSIZE | NOZORDER | NOACTIVATE
             Cursor = Cursors.SizeAll;
         }
+        else if (!dragging)
+            Cursor = RowAt(e.Location) != null ? Cursors.Hand : Cursors.Default;
         base.OnMouseMove(e);
     }
 
@@ -706,6 +864,11 @@ class WeatherForm : Form
         if (e.Button == MouseButtons.Left)
         {
             if (dragging && moved) c.Save();
+            else
+            {
+                var p = RowAt(e.Location);
+                if (p != null && p.Key != c.Main.Key) MakeMain(p);
+            }
             dragging = false;
             Cursor = Cursors.Default;
         }
@@ -713,9 +876,11 @@ class WeatherForm : Form
         base.OnMouseUp(e);
     }
 
+    Place RowAt(Point pt) { foreach (var h in rowHits) if (h.Key.Contains(pt)) return h.Value; return null; }
+
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
-        if (e.Button == MouseButtons.Left && !moved) OpenMap();
+        if (e.Button == MouseButtons.Left && !moved && RowAt(e.Location) == null) OpenMap();
         base.OnMouseDoubleClick(e);
     }
 
@@ -761,7 +926,7 @@ class WeatherForm : Form
 
     string WindText(double kmh)
     {
-        if (double.IsNaN(kmh)) return "";
+        if (double.IsNaN(kmh)) return "–";
         if (c.Wind == 1) return Math.Round(kmh / 1.609).ToString("0") + " mph";
         if (c.Wind == 2) return Math.Round(kmh / 3.6).ToString("0") + " m/s";
         return Math.Round(kmh).ToString("0") + " km/h";
@@ -787,38 +952,63 @@ class WeatherForm : Form
     }
 
     // The hours to show: from the current one, every hour (or every other one for 24).
-    List<Hour> ShownHours()
+    List<Hour> ShownHours(Forecast f, int want)
     {
-        if (data == null) return new List<Hour>();
-        var now = data.PlaceNow;
-        var first = data.Hours.FindIndex(h => h.T.AddHours(1) > now);
+        if (f == null) return new List<Hour>();
+        var now = f.PlaceNow;
+        var first = f.Hours.FindIndex(h => h.T.AddHours(1) > now);
         if (first < 0) return new List<Hour>();
-        int step = c.Hours > 12 ? 2 : 1, n = Math.Min(12, c.Hours / step);
+        int step = want > 12 ? 2 : 1, n = Math.Min(12, want / step);
         var list = new List<Hour>();
-        for (int i = first; i < data.Hours.Count && list.Count < n; i += step) list.Add(data.Hours[i]);
+        for (int i = first; i < f.Hours.Count && list.Count < n; i += step) list.Add(f.Hours[i]);
         return list;
     }
 
-    List<DayF> ShownDays()
+    List<DayF> ShownDays(Forecast f)
     {
-        if (data == null) return new List<DayF>();
-        var today = data.PlaceNow.Date;
-        return data.Days.Where(d => d.Date >= today).Take(c.Days).ToList();
+        if (f == null) return new List<DayF>();
+        var today = f.PlaceNow.Date;
+        return f.Days.Where(d => d.Date >= today).Take(c.Days).ToList();
     }
 
-    DayF Today { get { if (data == null) return null; var t = data.PlaceNow.Date; return data.Days.FirstOrDefault(d => d.Date == t); } }
+    static DayF TodayOf(Forecast f) { if (f == null) return null; var t = f.PlaceNow.Date; return f.Days.FirstOrDefault(d => d.Date == t); }
 
-    // ---- layout: every section's height, so the card is sized before it's drawn
-    const float HeaderH = 22, NowH = 66, HourlyH = 58, RainH = 44, SunH = 50, DayRowH = 25, Gap = 12;
+    // ---- layout: every block's height (at 100%), so the card is sized before it's drawn
+    const float HeaderH = 24, HeroH = 96, ChipsH = 50, IconsH = 24, CurveH = 54, LabelsH = 16, RainLineH = 20, RainOnlyH = 26,
+                SunH = 50, DayRowH = 26, RowH = 60, Gap = 10, TilePad = 10;
+
+    bool Detailed { get { return c.View != 2; } }
+    List<Place> Rows { get { var all = c.AllPlaces(); return c.View == 2 ? all : c.View == 1 ? all.Skip(1).ToList() : new List<Place>(); } }
+
+    float HourlyTileH()
+    {
+        if (!c.ShowHourly && !c.ShowRain) return 0;
+        float h = TilePad * 2;
+        if (c.ShowRain) h += RainLineH;
+        h += c.ShowHourly ? IconsH + CurveH + LabelsH : RainOnlyH;
+        return h;
+    }
 
     float ContentHeight()
     {
-        if (data == null) return 22 + 48;
-        float h = HeaderH + NowH;
-        if (c.ShowHourly && ShownHours().Count > 0) h += Gap + HourlyH;
-        if (c.ShowRain && ShownHours().Count > 0) h += (c.ShowHourly ? 2 : Gap) + RainH;
-        if (c.ShowSun && Today != null && Today.Rise != DateTime.MinValue) h += Gap + SunH;
-        if (c.ShowDaily) { var n = ShownDays().Count; if (n > 0) h += Gap + n * DayRowH; }
+        float h = HeaderH;
+        if (!c.HasPlace) return h + 48;
+        var f = data;
+        if (Detailed)
+        {
+            if (f == null) h += 48;
+            else
+            {
+                h += HeroH;
+                if (c.ShowDetails) h += Gap + ChipsH;
+                if ((c.ShowHourly || c.ShowRain) && ShownHours(f, c.Hours).Count > 0) h += Gap + HourlyTileH();
+                var today = TodayOf(f);
+                if (c.ShowSun && today != null && today.Rise != DateTime.MinValue) h += Gap + SunH + TilePad * 2;
+                if (c.ShowDaily) { var n = ShownDays(f).Count; if (n > 0) h += Gap + n * DayRowH + TilePad * 2; }
+            }
+        }
+        var rows = Rows.Count;
+        if (rows > 0) h += (Detailed ? Gap + 18 : 4) + rows * RowH + (rows - 1) * 8;
         return h;
     }
 
@@ -828,7 +1018,7 @@ class WeatherForm : Form
         if (IsDisposed || !IsHandleCreated) return;
         u = DeviceDpi / 96f * c.Scale / 100f;
         margin = (int)(14 * u);
-        float pad = 14 * u;
+        float pad = 16 * u;
         int cardW = (int)(c.Width * u), cardH = (int)(pad * 2 + ContentHeight() * u);
         winW = cardW + margin * 2; winH = cardH + margin * 2;
 
@@ -848,7 +1038,7 @@ class WeatherForm : Form
 
     Bitmap textLayer;
     readonly ShadowCache shadow = new ShadowCache();
-    string Fam { get { return c.FontName != "" && Draw.HasFont(c.FontName) ? c.FontName : Draw.Family; } }
+    string Fam { get { return c.FontName != "" && Draw.HasFont(c.FontName) ? c.FontName : Theme.IsTerm(c.ThemeName) ? Theme.Mono : Draw.Family; } }
 
     // Fonts by size and style, made again only when the font or scale changes.
     readonly Dictionary<string, Font> fonts = new Dictionary<string, Font>();
@@ -856,11 +1046,24 @@ class WeatherForm : Form
 
     Font F(float size, FontStyle style = FontStyle.Regular)
     {
-        var key = c.FontName + "|" + u + "|" + DeviceDpi;
+        var key = Fam + "|" + u + "|" + DeviceDpi;
         if (key != fontKey) { DisposeFonts(); fontKey = key; }
         var k = size + "/" + (int)style;
         Font f;
         if (!fonts.TryGetValue(k, out f)) fonts[k] = f = new Font(Fam, size * u / (DeviceDpi / 96f), style, GraphicsUnit.Point);
+        return f;
+    }
+
+    // The big temperature: Segoe UI Variable Display's light weight when the default font is in use.
+    Font Big(float size)
+    {
+        bool display = c.FontName == "" && !Theme.IsTerm(c.ThemeName) && Draw.HasFont("Segoe UI Variable Display Light");
+        if (!display) return F(size);
+        var key = Fam + "|" + u + "|" + DeviceDpi;
+        if (key != fontKey) { DisposeFonts(); fontKey = key; }
+        var k = "big" + size;
+        Font f;
+        if (!fonts.TryGetValue(k, out f)) fonts[k] = f = new Font("Segoe UI Variable Display Light", size * u / (DeviceDpi / 96f), FontStyle.Regular, GraphicsUnit.Point);
         return f;
     }
 
@@ -870,6 +1073,8 @@ class WeatherForm : Form
     static readonly StringFormat fmtR = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
     static readonly StringFormat fmtC = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap };
 
+    float CardRadius(Theme th) { return (th.Term ? 6 : 18) * u; }
+
     void PaintCard(Graphics target, int cardW, int cardH, float pad)
     {
         var th = Theme.Get(c.ThemeName);
@@ -878,8 +1083,8 @@ class WeatherForm : Form
         target.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
         var card = new RectangleF(margin, margin, cardW, cardH);
-        float rad = 16 * u;
-        shadow.Paint(target, winW, winH, card + "|" + u + "|" + c.Opacity, sg =>
+        float rad = CardRadius(th);
+        shadow.Paint(target, winW, winH, card + "|" + u + "|" + c.Opacity + "|" + rad, sg =>
         {
             for (int i = 1; i <= 6; i++)
                 using (var p = Draw.Round(RectangleF.Inflate(card, i * 1.6f * u, i * 1.6f * u), rad + i * 1.6f * u))
@@ -902,9 +1107,12 @@ class WeatherForm : Form
             g.TextContrast = 2;
         }
         else g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        WxIcon.Mono = th.Term ? th.Text : Color.Empty;
+        WxIcon.MonoBg = th.Bg;
         try { PaintContent(g, th, card, rad, crisp ? 255 : alpha, pad); }
         finally
         {
+            WxIcon.Mono = Color.Empty;
             if (crisp)
             {
                 g.Dispose();
@@ -919,12 +1127,39 @@ class WeatherForm : Form
         }
     }
 
+    // The sky's colour for a condition, used to tint the top of the card.
+    static Color Sky(int code, bool day)
+    {
+        if (code >= 95) return Color.FromArgb(124, 92, 214);
+        if ((code >= 71 && code <= 77) || code == 85 || code == 86) return Color.FromArgb(170, 205, 255);
+        if (code >= 51) return Color.FromArgb(48, 120, 220);
+        if (code == 45 || code == 48) return Color.FromArgb(150, 156, 170);
+        if (code == 3) return day ? Color.FromArgb(120, 136, 164) : Color.FromArgb(70, 80, 110);
+        return day ? Color.FromArgb(255, 160, 60) : Color.FromArgb(70, 76, 190);
+    }
+
     void PaintContent(Graphics g, Theme th, RectangleF card, float rad, int alpha, float pad)
     {
+        rowHits.Clear();
+        var f = data;
         using (var p = Draw.Round(card, rad))
         {
             using (var b = new SolidBrush(Color.FromArgb(alpha, th.Bg))) g.FillPath(b, p);
-            using (var pen = new Pen(th.Line, 1)) g.DrawPath(pen, p);
+            if (!th.Term && f != null && Detailed)
+            {
+                // a soft wash of the sky's colour, strongest at the top
+                var sky = Sky(f.Code, f.IsDay);
+                var wash = new RectangleF(card.X, card.Y, card.Width, Math.Min(card.Height, 260 * u));
+                using (var b = new LinearGradientBrush(new RectangleF(wash.X, wash.Y - 1, wash.Width, wash.Height + 2),
+                    Color.FromArgb(th.Light ? 46 : 70, sky), Color.FromArgb(0, sky), 90f))
+                using (var clip = new Region(p))
+                {
+                    var old = g.Clip; g.Clip = clip;
+                    g.FillRectangle(b, wash);
+                    g.Clip = old; old.Dispose();
+                }
+            }
+            using (var pen = new Pen(th.Term ? Color.FromArgb(150, th.Sub) : th.Line, th.Term ? Math.Max(1, u) : 1)) g.DrawPath(pen, p);
         }
 
         using (var text = new SolidBrush(th.Text))
@@ -932,141 +1167,300 @@ class WeatherForm : Form
         {
             float x = card.X + pad, w = card.Width - pad * 2, y = card.Y + pad;
 
-            // header: the place, and how fresh the forecast is
-            string status = fetching && data == null ? "Updating…"
-                : lastError != null ? (data == null ? "" : "Offline · " + Ago(data.Fetched))
-                : data != null ? "Updated " + Ago(data.Fetched) : "";
+            // header: the place (or "Weather" when every place is a row), and how fresh the forecast is
+            string status = fetching && f == null ? "Updating…"
+                : lastError != null ? (f == null ? "" : "Offline · " + Ago(f.Fetched))
+                : f != null ? "Updated " + Ago(c.View == 2 ? OldestFetch : f.Fetched) : "";
             var sw = status == "" ? 0 : g.MeasureString(status, F(8.5f), 400, fmtR).Width + 4 * u;
             using (var warn = new SolidBrush(lastError != null ? th.Accent : th.Sub))
                 g.DrawString(status, F(8.5f), warn, new RectangleF(x + w - sw, y, sw, HeaderH * u), fmtR);
-            g.DrawString(c.HasPlace ? (c.Place == "" ? "Weather" : c.Place) : "Kinetik Weather", F(11, FontStyle.Bold), text, new RectangleF(x, y, w - sw - 6 * u, HeaderH * u), fmtL);
+            string title = !c.HasPlace ? "Kinetik Weather" : c.View == 2 ? "Weather" : (c.Place == "" ? "Weather" : c.Place);
+            float tx = x;
+            if (th.Term) title = "> " + title;
+            else if (c.HasPlace && c.View != 2) { Pin(g, th, x, y + HeaderH * u / 2); tx += 14 * u; }
+            g.DrawString(title, F(11, FontStyle.Bold), text, new RectangleF(tx, y, w - sw - 6 * u - (tx - x), HeaderH * u), fmtL);
             y += HeaderH * u;
 
-            if (data == null)
+            if (!c.HasPlace || (Detailed && f == null))
             {
-                string msg = !c.HasPlace ? "Right-click → Set location… to choose a place."
+                string msg = !c.HasPlace ? "Right-click → Places → Add a place… to choose one."
                     : lastError != null ? lastError + ". Trying again in a few minutes." : "Getting the forecast…";
-                g.DrawString(msg, F(9.5f), sub, new RectangleF(x, y + 6 * u, w, 40 * u), new StringFormat { Trimming = StringTrimming.EllipsisWord });
-                return;
+                using (var wrap = new StringFormat { Trimming = StringTrimming.EllipsisWord })
+                    g.DrawString(msg, F(9.5f), sub, new RectangleF(x, y + 6 * u, w, 40 * u), wrap);
+                if (!c.HasPlace) return;
+                y += 48 * u;
             }
-
-            PaintNow(g, th, text, sub, x, y, w);
-            y += NowH * u;
-
-            var hours = ShownHours();
-            float colW = hours.Count > 0 ? w / hours.Count : 0;
-            if (c.ShowHourly && hours.Count > 0)
+            else if (Detailed)
             {
-                y += Gap * u;
-                Rule(g, th, x, y - Gap * u / 2, w);
-                for (int i = 0; i < hours.Count; i++)
+                PaintHero(g, th, text, sub, f, x, y, w);
+                y += HeroH * u;
+                if (c.ShowDetails) { y += Gap * u; PaintChips(g, th, text, sub, f, x, y, w); y += ChipsH * u; }
+
+                var hours = ShownHours(f, c.Hours);
+                if ((c.ShowHourly || c.ShowRain) && hours.Count > 0)
                 {
-                    var h = hours[i];
-                    var col = new RectangleF(x + i * colW, y, colW, HourlyH * u);
-                    bool full = i == 1 || (i > 1 && (hours[i - 1].T.Hour < 12) != (h.T.Hour < 12)) || hours.Count <= 8;
-                    g.DrawString(i == 0 ? "Now" : HourText(h.T, full), F(8), i == 0 ? text : sub, new RectangleF(col.X - 6 * u, col.Y, col.Width + 12 * u, 16 * u), fmtC);
-                    float isz = Math.Min(22 * u, colW - 2 * u);
-                    WxIcon.Paint(g, new RectangleF(col.X + (colW - isz) / 2, col.Y + 18 * u, isz, isz), h.Code, h.Day, th.Light);
-                    g.DrawString(Temp(i == 0 ? data.Temp : h.Temp), F(9, FontStyle.Bold), text, new RectangleF(col.X - 4 * u, col.Y + 42 * u, col.Width + 8 * u, 16 * u), fmtC);
+                    y += Gap * u;
+                    float h = HourlyTileH() * u;
+                    Tile(g, th, new RectangleF(x, y, w, h));
+                    PaintHourly(g, th, text, sub, f, hours, x + TilePad * u, y + TilePad * u, w - TilePad * u * 2);
+                    y += h;
                 }
-                y += HourlyH * u;
+
+                var today = TodayOf(f);
+                if (c.ShowSun && today != null && today.Rise != DateTime.MinValue)
+                {
+                    y += Gap * u;
+                    Tile(g, th, new RectangleF(x, y, w, (SunH + TilePad * 2) * u));
+                    PaintSun(g, th, text, sub, f, today, x + TilePad * u, y + TilePad * u, w - TilePad * u * 2);
+                    y += (SunH + TilePad * 2) * u;
+                }
+
+                var days = ShownDays(f);
+                if (c.ShowDaily && days.Count > 0)
+                {
+                    y += Gap * u;
+                    Tile(g, th, new RectangleF(x, y, w, (days.Count * DayRowH + TilePad * 2) * u));
+                    PaintDays(g, th, text, sub, f, days, x + TilePad * u, y + TilePad * u, w - TilePad * u * 2);
+                    y += (days.Count * DayRowH + TilePad * 2) * u;
+                }
             }
 
-            if (c.ShowRain && hours.Count > 0)
+            var rows = Rows;
+            if (rows.Count > 0)
             {
-                y += (c.ShowHourly ? 2 : Gap) * u;
-                if (!c.ShowHourly) Rule(g, th, x, y - Gap * u / 2, w);
-                PaintRain(g, th, sub, hours, x, y, w, colW);
-                y += RainH * u;
-            }
-
-            var today = Today;
-            if (c.ShowSun && today != null && today.Rise != DateTime.MinValue)
-            {
-                y += Gap * u;
-                Rule(g, th, x, y - Gap * u / 2, w);
-                PaintSun(g, th, text, sub, today, x, y, w);
-                y += SunH * u;
-            }
-
-            var days = ShownDays();
-            if (c.ShowDaily && days.Count > 0)
-            {
-                y += Gap * u;
-                Rule(g, th, x, y - Gap * u / 2, w);
-                PaintDays(g, th, text, sub, days, x, y, w);
+                if (Detailed)
+                {
+                    y += Gap * u;
+                    g.DrawString(th.Term ? "-- other places --" : "Other places", F(8, FontStyle.Bold), sub, new RectangleF(x, y, w, 18 * u), fmtL);
+                    y += 18 * u;
+                }
+                else y += 4 * u;
+                foreach (var p in rows)
+                {
+                    var r = new RectangleF(x, y, w, RowH * u);
+                    PaintRow(g, th, text, sub, p, r);
+                    rowHits.Add(new KeyValuePair<RectangleF, Place>(r, p));
+                    y += (RowH + 8) * u;
+                }
             }
         }
     }
 
-    void Rule(Graphics g, Theme th, float x, float y, float w) { using (var pen = new Pen(th.Line, 1)) g.DrawLine(pen, x, y, x + w, y); }
-
-    Color RainCol(Theme th) { return th.Light ? Color.FromArgb(40, 120, 230) : WxIcon.Rain; }
-
-    // a big icon and temperature, what it's like, and the day's high and low with the wind
-    void PaintNow(Graphics g, Theme th, Brush text, Brush sub, float x, float y, float w)
+    // A section's background: a faint rounded panel, or a thin box in the terminal themes.
+    void Tile(Graphics g, Theme th, RectangleF r)
     {
-        float isz = 52 * u;
-        WxIcon.Paint(g, new RectangleF(x - 2 * u, y + (NowH * u - isz) / 2, isz, isz), data.Code, data.IsDay, th.Light);
-        float tx = x + isz + 8 * u;
-        var big = F(27);
-        var t = Temp(data.Temp);
-        var tw = g.MeasureString(t, big, 400, fmtL).Width;
-        g.DrawString(t, big, text, new RectangleF(tx, y, tw + 4 * u, NowH * u), fmtL);
-
-        float rx = tx + tw + 8 * u, rw = x + w - rx;
-        var today = Today;
-        string hl = today != null ? "H " + Temp(today.Max) + "  L " + Temp(today.Min) : "";
-        string wind = WindText(data.Wind);
-        if (wind != "") wind = "Wind " + wind + " " + Weather.Compass(data.WindDir);
-        float lh = 17 * u, top = y + (NowH * u - lh * 3) / 2;
-        g.DrawString(Weather.Describe(data.Code, data.IsDay), F(10.5f, FontStyle.Bold), text, new RectangleF(rx, top, rw, lh), fmtR);
-        g.DrawString("Feels " + Temp(data.Feels) + (hl != "" ? "  ·  " + hl : ""), F(8.5f), sub, new RectangleF(rx, top + lh, rw, lh), fmtR);
-        g.DrawString(wind + (double.IsNaN(data.Humidity) ? "" : "  ·  " + Math.Round(data.Humidity) + "%"), F(8.5f), sub, new RectangleF(rx, top + lh * 2, rw, lh), fmtR);
+        using (var p = Draw.Round(r, (th.Term ? 3 : 12) * u))
+        {
+            if (th.Term) { using (var pen = new Pen(Color.FromArgb(110, th.Sub), Math.Max(1, u))) g.DrawPath(pen, p); return; }
+            using (var b = new SolidBrush(Color.FromArgb(th.Light ? 12 : 16, th.Light ? Color.Black : Color.White))) g.FillPath(b, p);
+            using (var pen = new Pen(Color.FromArgb(th.Light ? 14 : 18, th.Light ? Color.Black : Color.White), 1)) g.DrawPath(pen, p);
+        }
     }
 
-    // a line saying when rain is most likely, over a bar per hour for its chance
-    void PaintRain(Graphics g, Theme th, Brush sub, List<Hour> hours, float x, float y, float w, float colW)
+    // A map pin before the place's name.
+    void Pin(Graphics g, Theme th, float x, float cy)
     {
-        var rain = RainCol(th);
-        var best = hours.Where(h => !double.IsNaN(h.Pop)).OrderByDescending(h => h.Pop).FirstOrDefault();
-        string span = c.Hours > 12 ? "24 hours" : c.Hours + " hours";
-        string line = best == null ? "No chance of rain given"
-            : best.Pop >= 50 ? "Rain likely around " + (best == hours[0] ? "now" : HourText(best.T)) + " · " + best.Pop + "%"
-            : best.Pop >= 20 ? "Chance of rain around " + (best == hours[0] ? "now" : HourText(best.T)) + " · " + best.Pop + "%"
-            : "No rain expected in the next " + span;
-        float d = 9 * u;
-        using (var b = new SolidBrush(rain))
+        float d = 9 * u, top = cy - d * 0.75f;
         using (var p = new GraphicsPath())
         {
-            // a small drop
-            float dx = x + 1 * u, dy = y + 4 * u;
+            p.AddArc(x, top, d, d, 135, 270);
+            p.AddLine(x + d * 0.85f, top + d * 0.85f, x + d / 2, top + d * 1.45f);
+            p.CloseFigure();
+            using (var b = new SolidBrush(th.Accent)) g.FillPath(b, p);
+        }
+        using (var b = new SolidBrush(th.Bg)) g.FillEllipse(b, x + d * 0.32f, top + d * 0.32f, d * 0.36f, d * 0.36f);
+    }
+
+    Color RainCol(Theme th) { return th.Term ? th.Text : th.Light ? Color.FromArgb(40, 120, 230) : WxIcon.Rain; }
+    Color SunCol(Theme th) { return th.Term ? th.Text : WxIcon.Sun; }
+    Color TempCol(Theme th, double celsius) { return th.Term ? th.Text : TempColour(celsius); }
+
+    // the big temperature with the condition and the day's range under it, and a large icon on the right
+    void PaintHero(Graphics g, Theme th, Brush text, Brush sub, Forecast f, float x, float y, float w)
+    {
+        float isz = 78 * u;
+        WxIcon.Paint(g, new RectangleF(x + w - isz + 4 * u, y + 2 * u, isz, isz), f.Code, f.IsDay, th.Light);
+        var t = Temp(f.Temp);
+        g.DrawString(t, Big(40), text, new RectangleF(x - 4 * u, y - 2 * u, w - isz, 62 * u), fmtL);
+        var today = TodayOf(f);
+        g.DrawString(Weather.Describe(f.Code, f.IsDay), F(11.5f, FontStyle.Bold), text, new RectangleF(x, y + 60 * u, w - 8 * u, 18 * u), fmtL);
+        string hl = today != null ? "H " + Temp(today.Max) + "   L " + Temp(today.Min) : "";
+        if (!c.ShowDetails) hl += (hl != "" ? "   ·   " : "") + "Feels " + Temp(f.Feels);
+        if (TimeZoneDiffers(f)) hl += (hl != "" ? "   ·   " : "") + ClockText(f.PlaceNow) + " there";
+        g.DrawString(hl, F(9), sub, new RectangleF(x, y + 78 * u, w, 17 * u), fmtL);
+    }
+
+    static bool TimeZoneDiffers(Forecast f) { return Math.Abs(f.Offset - TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalSeconds) >= 60; }
+
+    // four small tiles: feels like, wind (with an arrow showing where it blows), humidity, and the UV index (or rain)
+    void PaintChips(Graphics g, Theme th, Brush text, Brush sub, Forecast f, float x, float y, float w)
+    {
+        var today = TodayOf(f);
+        float gap = 6 * u, cw = (w - gap * 3) / 4, h = ChipsH * u;
+        bool uv = today != null && !double.IsNaN(today.Uv);
+        // label (and a shorter one for when it doesn't fit), value, and a unit drawn small after the value
+        var wind = WindText(f.Wind).Split(' ');
+        var items = new[]
+        {
+            new[] { "Feels like", "Feels", Temp(f.Feels), "" },
+            new[] { "Wind " + Weather.Compass(f.WindDir), Weather.Compass(f.WindDir), wind[0], wind.Length > 1 ? wind[1] : "" },
+            new[] { "Humidity", "Humid.", double.IsNaN(f.Humidity) ? "–" : Math.Round(f.Humidity).ToString("0"), double.IsNaN(f.Humidity) ? "" : "%" },
+            uv ? new[] { "UV index", "UV", Math.Round(today.Uv).ToString("0"), UvWord(today.Uv) }
+               : new[] { "Rain today", "Rain", today == null || double.IsNaN(today.Pop) ? "–" : Math.Round(today.Pop).ToString("0"), "%" },
+        };
+        for (int i = 0; i < items.Length; i++)
+        {
+            var r = new RectangleF(x + i * (cw + gap), y, cw, h);
+            Tile(g, th, r);
+            float room = r.Width - 12 * u;
+            var label = g.MeasureString(items[i][0], F(7.5f)).Width <= room ? items[i][0] : items[i][1];
+            g.DrawString(label, F(7.5f), sub, new RectangleF(r.X + 8 * u, r.Y + 6 * u, room, 16 * u), fmtL);
+            float vx = r.X + 8 * u;
+            if (i == 1 && !double.IsNaN(f.WindDir))
+            {
+                Arrow(g, th.Text, vx + 5 * u, r.Y + 33 * u, 5.5f * u, (float)f.WindDir + 180);
+                vx += 13 * u;
+            }
+            var vf = F(10.5f, FontStyle.Bold);
+            float vw = g.MeasureString(items[i][2], vf, 400, fmtL).Width - 1 * u;
+            g.DrawString(items[i][2], vf, text, new RectangleF(vx, r.Y + 23 * u, r.Right - vx - 4 * u, 20 * u), fmtL);
+            if (items[i][3] != "" && vx + vw < r.Right - 8 * u)
+                g.DrawString(items[i][3], F(7.5f), sub, new RectangleF(vx + vw, r.Y + 25 * u, r.Right - vx - vw - 2 * u, 18 * u), fmtL);
+        }
+    }
+
+    static string UvWord(double uv) { return uv < 3 ? "Low" : uv < 6 ? "Mod" : uv < 8 ? "High" : uv < 11 ? "V.high" : "Extr"; }
+
+    // a small arrow pointing toward bearing (degrees clockwise from north)
+    static void Arrow(Graphics g, Color col, float cx, float cy, float r, float bearing)
+    {
+        double a = (bearing - 90) * Math.PI / 180;
+        Func<double, float, PointF> at = (ang, len) => new PointF(cx + (float)Math.Cos(ang) * len, cy + (float)Math.Sin(ang) * len);
+        var pts = new[] { at(a, r), at(a + 2.5, r), at(a + Math.PI, r * 0.35f), at(a - 2.5, r) };
+        using (var b = new SolidBrush(col)) g.FillPolygon(b, pts);
+    }
+
+    // The next hours: icons along the top, the temperature as a smooth curve with each hour's value, the chance of rain
+    // as soft bars behind it, and the hours underneath; a line above says when rain is most likely.
+    void PaintHourly(Graphics g, Theme th, Brush text, Brush sub, Forecast f, List<Hour> hours, float x, float y, float w)
+    {
+        var rain = RainCol(th);
+        if (c.ShowRain)
+        {
+            var best = hours.Where(h => !double.IsNaN(h.Pop)).OrderByDescending(h => h.Pop).FirstOrDefault();
+            string span = c.Hours > 12 ? "24 hours" : c.Hours + " hours";
+            string line = best == null ? "No chance of rain given"
+                : best.Pop >= 50 ? "Rain likely around " + (best == hours[0] ? "now" : HourText(best.T)) + " · " + best.Pop + "%"
+                : best.Pop >= 20 ? "Chance of rain around " + (best == hours[0] ? "now" : HourText(best.T)) + " · " + best.Pop + "%"
+                : "No rain expected in the next " + span;
+            Drop(g, rain, x + 1 * u, y + 4 * u, 9 * u);
+            g.DrawString(line, F(8.5f), sub, new RectangleF(x + 15 * u, y, w - 15 * u, 16 * u), fmtL);
+            y += RainLineH * u;
+        }
+
+        int n = hours.Count;
+        float colW = w / n;
+        if (!c.ShowHourly)
+        {
+            PaintRainBars(g, th, hours, x, y, colW, RainOnlyH * u - 4 * u, true);
+            return;
+        }
+
+        // icons
+        float isz = Math.Min(20 * u, colW - 4 * u);
+        for (int i = 0; i < n; i++)
+            WxIcon.Paint(g, new RectangleF(x + i * colW + (colW - isz) / 2, y + (IconsH * u - isz) / 2, isz, isz), hours[i].Code, hours[i].Day, th.Light);
+        y += IconsH * u;
+
+        // the curve: each hour's temperature between the area's top (with room for its label) and bottom
+        float top = y + 16 * u, bottom = y + CurveH * u - 6 * u;
+        var temps = hours.Select((h, i) => i == 0 && !double.IsNaN(f.Temp) ? f.Temp : h.Temp).ToList();
+        var valid = temps.Where(t => !double.IsNaN(t)).ToList();
+        double lo = valid.Count > 0 ? valid.Min() : 0, hi = valid.Count > 0 ? valid.Max() : 1;
+        if (hi - lo < 4) { double mid = (hi + lo) / 2; lo = mid - 2; hi = mid + 2; }
+        if (c.ShowRain) PaintRainBars(g, th, hours, x, y + 6 * u, colW, CurveH * u - 6 * u, false);
+        var pts = new List<PointF>();
+        for (int i = 0; i < n; i++)
+        {
+            double t = double.IsNaN(temps[i]) ? (lo + hi) / 2 : temps[i];
+            pts.Add(new PointF(x + i * colW + colW / 2, bottom - (float)((t - lo) / (hi - lo)) * (bottom - top)));
+        }
+        if (n >= 2)
+        {
+            var arr = pts.ToArray();
+            // the area under the curve fades out downwards
+            using (var area = new GraphicsPath())
+            {
+                area.AddCurve(arr, 0.5f);
+                area.AddLine(arr[n - 1].X, arr[n - 1].Y, arr[n - 1].X, bottom + 6 * u);
+                area.AddLine(arr[n - 1].X, bottom + 6 * u, arr[0].X, bottom + 6 * u);
+                area.CloseFigure();
+                Color warm = TempCol(th, hi);
+                using (var b = new LinearGradientBrush(new RectangleF(x, top - 1, w, bottom - top + 8 * u), Color.FromArgb(th.Term ? 40 : 70, warm), Color.FromArgb(0, warm), 90f))
+                    g.FillPath(b, area);
+            }
+            using (var b = new LinearGradientBrush(new RectangleF(x, top - 2, w, bottom - top + 4), TempCol(th, hi), TempCol(th, lo), 90f))
+            using (var pen = new Pen(b, 2.2f * u) { LineJoin = LineJoin.Round, StartCap = LineCap.Round, EndCap = LineCap.Round })
+                g.DrawCurve(pen, arr, 0.5f);
+        }
+        for (int i = 0; i < n; i++)
+        {
+            var pt = pts[i];
+            float r = (i == 0 ? 3.6f : 2.4f) * u;
+            using (var b = new SolidBrush(i == 0 ? th.Text : TempCol(th, double.IsNaN(temps[i]) ? lo : temps[i]))) g.FillEllipse(b, pt.X - r, pt.Y - r, r * 2, r * 2);
+            if (i == 0) using (var pen = new Pen(th.Bg, 1.4f * u)) g.DrawEllipse(pen, pt.X - r, pt.Y - r, r * 2, r * 2);
+            g.DrawString(Temp(temps[i]), F(8, i == 0 ? FontStyle.Bold : FontStyle.Regular), i == 0 ? text : sub,
+                new RectangleF(pt.X - colW / 2 - 6 * u, pt.Y - 17 * u, colW + 12 * u, 14 * u), fmtC);
+        }
+        y += CurveH * u;
+
+        // hours
+        for (int i = 0; i < n; i++)
+        {
+            var h = hours[i];
+            bool full = (i == 1 && colW >= 30 * u) || (i > 1 && (hours[i - 1].T.Hour < 12) != (h.T.Hour < 12)) || n <= 8;
+            g.DrawString(i == 0 ? "Now" : HourText(h.T, full), F(7.5f, i == 0 ? FontStyle.Bold : FontStyle.Regular), i == 0 ? text : sub,
+                new RectangleF(x + i * colW - 6 * u, y, colW + 12 * u, LabelsH * u), fmtC);
+        }
+    }
+
+    // a bar per hour for its chance of rain: on its own (tracks shown), or faint behind the temperature curve
+    void PaintRainBars(Graphics g, Theme th, List<Hour> hours, float x, float y, float colW, float h, bool alone)
+    {
+        var rain = RainCol(th);
+        float bw = Math.Max(3 * u, Math.Min(colW * (alone ? 0.5f : 0.62f), (alone ? 12 : 16) * u));
+        for (int i = 0; i < hours.Count; i++)
+        {
+            float bx = x + i * colW + (colW - bw) / 2;
+            if (alone)
+                using (var track = new SolidBrush(Color.FromArgb(th.Light ? 18 : 22, th.Text)))
+                using (var p = Draw.Round(new RectangleF(bx, y, bw, h), bw / 2)) g.FillPath(track, p);
+            double pop = hours[i].Pop;
+            if (double.IsNaN(pop) || pop < 10) continue;
+            float bh = Math.Max(bw / 2, h * (float)Math.Min(1, pop / 100) * (alone ? 1 : 0.7f));
+            using (var p = Draw.Round(new RectangleF(bx, y + h - bh, bw, bh), Math.Min(bw / 2, (alone ? bw / 2 : 3 * u))))
+            using (var b = new SolidBrush(Color.FromArgb(alone ? (int)(110 + 145 * Math.Min(1, pop / 100)) : (int)((th.Term ? 30 : 40) + 70 * Math.Min(1, pop / 100)), rain)))
+                g.FillPath(b, p);
+        }
+    }
+
+    static void Drop(Graphics g, Color col, float dx, float dy, float d)
+    {
+        using (var b = new SolidBrush(col))
+        using (var p = new GraphicsPath())
+        {
             p.AddBezier(dx + d / 2, dy, dx + d * 0.1f, dy + d * 0.45f, dx, dy + d * 0.6f, dx, dy + d * 0.72f);
             p.AddArc(dx, dy + d * 0.44f, d, d * 0.56f, 180, -180);
             p.AddBezier(dx + d, dy + d * 0.72f, dx + d, dy + d * 0.6f, dx + d * 0.9f, dy + d * 0.45f, dx + d / 2, dy);
             g.FillPath(b, p);
         }
-        g.DrawString(line, F(8.5f), sub, new RectangleF(x + d + 6 * u, y, w - d - 6 * u, 16 * u), fmtL);
-
-        float barTop = y + 20 * u, barH = RainH * u - 22 * u;
-        using (var track = new SolidBrush(Color.FromArgb(th.Light ? 18 : 22, th.Text)))
-        using (var fill = new SolidBrush(rain))
-            for (int i = 0; i < hours.Count; i++)
-            {
-                float bw = Math.Max(3 * u, Math.Min(colW * 0.5f, 12 * u)), bx = x + i * colW + (colW - bw) / 2;
-                using (var p = Draw.Round(new RectangleF(bx, barTop, bw, barH), bw / 2)) g.FillPath(track, p);
-                double pop = hours[i].Pop;
-                if (double.IsNaN(pop) || pop < 10) continue;
-                float bh = Math.Max(bw, barH * (float)Math.Min(1, pop / 100));
-                using (var p = Draw.Round(new RectangleF(bx, barTop + barH - bh, bw, bh), bw / 2))
-                using (var b = new SolidBrush(Color.FromArgb((int)(110 + 145 * Math.Min(1, pop / 100)), rain))) g.FillPath(b, p);
-            }
     }
 
     // the sun's path across today, with where it is now, sunrise and sunset under the ends
-    void PaintSun(Graphics g, Theme th, Brush text, Brush sub, DayF today, float x, float y, float w)
+    void PaintSun(Graphics g, Theme th, Brush text, Brush sub, Forecast fc, DayF today, float x, float y, float w)
     {
-        var now = data.PlaceNow;
+        var now = fc.PlaceNow;
+        var sun = SunCol(th);
         float arcW = w * 0.46f, ax = x + (w - arcW) / 2, ay = y + 4 * u, ah = SunH * u - 22 * u;
         var arc = new RectangleF(ax, ay, arcW, ah * 2);
         using (var pen = new Pen(Color.FromArgb(th.Light ? 60 : 70, th.Sub), 1.4f * u) { DashStyle = DashStyle.Dot })
@@ -1077,11 +1471,11 @@ class WeatherForm : Form
         if (f > 0 && f < 1)
         {
             // the part already travelled, then the sun itself
-            using (var pen = new Pen(Color.FromArgb(200, WxIcon.Sun), 1.8f * u)) g.DrawArc(pen, arc, 180, (float)(180 * f));
+            using (var pen = new Pen(Color.FromArgb(200, sun), 1.8f * u)) g.DrawArc(pen, arc, 180, (float)(180 * f));
             double a = Math.PI * (1 - f);
             float sx = ax + arcW / 2 + (float)Math.Cos(a) * arcW / 2, sy = ay + ah - (float)Math.Sin(a) * ah, r = 5 * u;
-            using (var b = new SolidBrush(Color.FromArgb(60, WxIcon.Sun))) g.FillEllipse(b, sx - r * 1.8f, sy - r * 1.8f, r * 3.6f, r * 3.6f);
-            using (var b = new SolidBrush(WxIcon.Sun)) g.FillEllipse(b, sx - r, sy - r, r * 2, r * 2);
+            using (var b = new SolidBrush(Color.FromArgb(60, sun))) g.FillEllipse(b, sx - r * 1.8f, sy - r * 1.8f, r * 3.6f, r * 3.6f);
+            using (var b = new SolidBrush(sun)) g.FillEllipse(b, sx - r, sy - r, r * 2, r * 2);
         }
 
         float lw = (w - arcW) / 2 - 6 * u;
@@ -1106,22 +1500,22 @@ class WeatherForm : Form
     }
 
     // one row a day: name, icon, chance of rain, and the low-to-high range against the whole week's
-    void PaintDays(Graphics g, Theme th, Brush text, Brush sub, List<DayF> days, float x, float y, float w)
+    void PaintDays(Graphics g, Theme th, Brush text, Brush sub, Forecast f, List<DayF> days, float x, float y, float w)
     {
         double lo = days.Where(d => !double.IsNaN(d.Min)).Select(d => d.Min).DefaultIfEmpty(0).Min();
         double hi = days.Where(d => !double.IsNaN(d.Max)).Select(d => d.Max).DefaultIfEmpty(1).Max();
         if (hi - lo < 1) hi = lo + 1;
         var rain = RainCol(th);
-        float nameW = 62 * u, iconW = 26 * u, popW = 36 * u, tW = 32 * u;
+        float nameW = 58 * u, iconW = 26 * u, popW = 36 * u, tW = 32 * u;
         float barX = x + nameW + iconW + popW + tW, barW = Math.Max(20 * u, w - (nameW + iconW + popW + tW * 2) - 8 * u);
-        var today = data.PlaceNow.Date;
+        var today = f.PlaceNow.Date;
         for (int i = 0; i < days.Count; i++)
         {
             var d = days[i];
             float ry = y + i * DayRowH * u, rh = DayRowH * u;
             string name = d.Date == today ? "Today" : d.Date.ToString("ddd");
             g.DrawString(name, F(9.5f, d.Date == today ? FontStyle.Bold : FontStyle.Regular), text, new RectangleF(x, ry, nameW, rh), fmtL);
-            float isz = 18 * u;
+            float isz = 19 * u;
             WxIcon.Paint(g, new RectangleF(x + nameW, ry + (rh - isz) / 2, isz, isz), d.Code, true, th.Light);
             if (!double.IsNaN(d.Pop) && d.Pop >= 20)
                 using (var b = new SolidBrush(rain)) g.DrawString(Math.Round(d.Pop) + "%", F(8.5f, FontStyle.Bold), b, new RectangleF(x + nameW + iconW, ry, popW, rh), fmtL);
@@ -1136,15 +1530,73 @@ class WeatherForm : Form
             if (s1 - s0 < bh) s1 = s0 + bh;
             var seg = new RectangleF(s0, by, s1 - s0, bh);
             using (var p = Draw.Round(seg, bh / 2))
-            using (var b = new LinearGradientBrush(new RectangleF(barX - 1, by, barW + 2, bh), TempColour(lo), TempColour(hi), 0f))
+            using (var b = new LinearGradientBrush(new RectangleF(barX - 1, by, barW + 2, bh), TempCol(th, lo), TempCol(th, hi), 0f))
                 g.FillPath(b, p);
-            if (d.Date == today && !double.IsNaN(data.Temp))
+            if (d.Date == today && !double.IsNaN(f.Temp))
             {
-                float nx = barX + barW * (float)Math.Max(0, Math.Min(1, (data.Temp - lo) / (hi - lo)));
+                float nx = barX + barW * (float)Math.Max(0, Math.Min(1, (f.Temp - lo) / (hi - lo)));
                 using (var b = new SolidBrush(th.Text)) g.FillEllipse(b, nx - bh * 0.8f, by - bh * 0.3f, bh * 1.6f, bh * 1.6f);
                 using (var pen = new Pen(th.Bg, 1.2f * u)) g.DrawEllipse(pen, nx - bh * 0.8f, by - bh * 0.3f, bh * 1.6f, bh * 1.6f);
             }
         }
+    }
+
+    // A compact row for one place: its name, local time and conditions, the next 12 hours as a little line, an icon,
+    // and the temperature with the day's range.
+    void PaintRow(Graphics g, Theme th, Brush text, Brush sub, Place p, RectangleF r)
+    {
+        Forecast f;
+        got.TryGetValue(p.Key, out f);
+        bool main = c.View == 2 && p.Key == c.Main.Key;
+        Tile(g, th, r);
+        if (main && !th.Term)
+            using (var b = new SolidBrush(th.Accent))
+            using (var path = Draw.Round(new RectangleF(r.X + 4 * u, r.Y + 14 * u, 3 * u, r.Height - 28 * u), 1.5f * u)) g.FillPath(b, path);
+        float x = r.X + 12 * u, right = r.Right - 10 * u;
+        string err;
+        if (f == null)
+        {
+            g.DrawString(p.Name, F(10.5f, FontStyle.Bold), text, new RectangleF(x, r.Y + 8 * u, right - x, 22 * u), fmtL);
+            string msg = errs.TryGetValue(p.Key, out err) ? err : fetching ? "Updating…" : "Waiting for the forecast";
+            g.DrawString(msg, F(8.5f), sub, new RectangleF(x, r.Y + 30 * u, right - x, 18 * u), fmtL);
+            return;
+        }
+
+        var today = TodayOf(f);
+        float tempW = 58 * u;
+        g.DrawString(Temp(f.Temp), Big(19), text, new RectangleF(right - tempW, r.Y + 6 * u, tempW + 2 * u, 30 * u), fmtR);
+        if (today != null)
+            g.DrawString(Temp(today.Max) + " / " + Temp(today.Min), F(8), sub, new RectangleF(right - tempW - 10 * u, r.Y + 36 * u, tempW + 12 * u, 16 * u), fmtR);
+        float isz = 34 * u, ix = right - tempW - isz - 2 * u;
+        WxIcon.Paint(g, new RectangleF(ix, r.Y + (r.Height - isz) / 2, isz, isz), f.Code, f.IsDay, th.Light);
+
+        string line = Weather.Describe(f.Code, f.IsDay);
+        if (TimeZoneDiffers(f)) line = ClockText(f.PlaceNow) + "  ·  " + line;
+        if (errs.ContainsKey(p.Key)) line = "Offline · " + Ago(f.Fetched);
+        string name = (th.Term && main ? "* " : "") + p.Name;
+        float need = Math.Max(g.MeasureString(line, F(8.5f)).Width, g.MeasureString(name, F(10.5f, FontStyle.Bold)).Width);
+
+        // the next 12 hours' temperatures as a little line, when there's room for it
+        float sparkW = 64 * u, textRight = ix - 6 * u;
+        if (textRight - x - need > sparkW + 12 * u)
+        {
+            var hrs = ShownHours(f, 12);
+            if (hrs.Count >= 3)
+            {
+                float sx = textRight - sparkW, sy = r.Y + 18 * u, sh = 22 * u;
+                double lo = hrs.Min(h => double.IsNaN(h.Temp) ? double.MaxValue : h.Temp), hi = hrs.Max(h => double.IsNaN(h.Temp) ? double.MinValue : h.Temp);
+                if (hi - lo < 3) { double mid = (hi + lo) / 2; lo = mid - 1.5; hi = mid + 1.5; }
+                var pts = hrs.Select((h, i) => new PointF(sx + sparkW * i / (hrs.Count - 1), sy + sh - (float)(((double.IsNaN(h.Temp) ? lo : h.Temp) - lo) / (hi - lo)) * sh)).ToArray();
+                using (var b = new LinearGradientBrush(new RectangleF(sx, sy - 1, sparkW, sh + 2), TempCol(th, hi), TempCol(th, lo), 90f))
+                using (var pen = new Pen(b, 1.6f * u) { LineJoin = LineJoin.Round })
+                    g.DrawCurve(pen, pts, 0.5f);
+                using (var b = new SolidBrush(th.Text)) g.FillEllipse(b, pts[0].X - 2.4f * u, pts[0].Y - 2.4f * u, 4.8f * u, 4.8f * u);
+                textRight = sx - 8 * u;
+            }
+        }
+
+        g.DrawString(name, F(10.5f, FontStyle.Bold), text, new RectangleF(x, r.Y + 8 * u, textRight - x, 22 * u), fmtL);
+        g.DrawString(line, F(8.5f), sub, new RectangleF(x, r.Y + 30 * u, textRight - x, 18 * u), fmtL);
     }
 
     // cold blue through mild green to hot orange-red, by °C
@@ -1202,12 +1654,40 @@ class WeatherForm : Form
         foreach (var it in old) it.Dispose();
         menu.Items.Add(Item(fetching ? "Updating…" : "Refresh now", false, Fetch));
         menu.Items[0].Enabled = !fetching && c.HasPlace && !Program.Demo;
-        menu.Items.Add(Item("Set location…", false, ChoosePlace));
         menu.Items.Add(Item("Open the radar map", false, OpenMap));
         menu.Items.Add(Item("Weather data by Open-Meteo.com", false, () => { try { System.Diagnostics.Process.Start("https://open-meteo.com/"); } catch { } }));
         menu.Items.Add(new ToolStripSeparator());
 
+        // Places: the main one first, then the others, each with its own options; then how many to show at once
+        var places = new ToolStripMenuItem("Places");
+        var all = c.AllPlaces();
+        var add = Item("Add a place…", false, AddPlace);
+        add.Enabled = all.Count < MaxPlaces;
+        places.DropDownItems.Add(add);
+        places.DropDownItems.Add(new ToolStripSeparator());
+        for (int i = 0; i < all.Count; i++)
+        {
+            var p = all[i];
+            int at = i;
+            var item = new ToolStripMenuItem(p.Name + (i == 0 ? "  (main)" : "")) { Checked = i == 0 };
+            if (i == 0) item.DropDownItems.Add(Item("Change this place…", false, ChoosePlace));
+            else
+            {
+                item.DropDownItems.Add(Item("Make it the main place", false, () => MakeMain(p)));
+                if (at > 1) item.DropDownItems.Add(Item("Move up", false, () => MoveOther(at - 1, -1)));
+                if (at < all.Count - 1) item.DropDownItems.Add(Item("Move down", false, () => MoveOther(at - 1, 1)));
+                item.DropDownItems.Add(Item("Remove", false, () => RemoveOther(at - 1)));
+            }
+            places.DropDownItems.Add(item);
+        }
+        places.DropDownItems.Add(new ToolStripSeparator());
+        places.DropDownItems.Add(Item("Show just the main place", c.View == 0, () => SetView(0)));
+        places.DropDownItems.Add(Item("Show the main place, and the others below it", c.View == 1, () => SetView(1)));
+        places.DropDownItems.Add(Item("Show every place in a compact list", c.View == 2, () => SetView(2)));
+        menu.Items.Add(places);
+
         var show = new ToolStripMenuItem("Show");
+        show.DropDownItems.Add(Item("Details (feels like, wind, humidity, UV)", c.ShowDetails, () => { c.ShowDetails = !c.ShowDetails; Changed(); }));
         show.DropDownItems.Add(Item("Next hours", c.ShowHourly, () => { c.ShowHourly = !c.ShowHourly; Changed(); }));
         show.DropDownItems.Add(Item("Chance of rain", c.ShowRain, () => { c.ShowRain = !c.ShowRain; Changed(); }));
         show.DropDownItems.Add(Item("Sunrise and sunset", c.ShowSun, () => { c.ShowSun = !c.ShowSun; Changed(); }));
@@ -1230,7 +1710,7 @@ class WeatherForm : Form
         menu.Items.Add(units);
 
         var every = new ToolStripMenuItem("Update every");
-        foreach (var m in new[] { 15, 30, 60, 120 }) { int v = m; every.DropDownItems.Add(Item(v < 60 ? v + " minutes" : v / 60 + (v == 60 ? " hour" : " hours"), c.Refresh == v, () => { c.Refresh = v; c.Save(); if (data != null) ScheduleFetchSeconds((int)Math.Max(5, v * 60 - (DateTime.UtcNow - data.Fetched).TotalSeconds)); })); }
+        foreach (var m in new[] { 15, 30, 60, 120 }) { int v = m; every.DropDownItems.Add(Item(v < 60 ? v + " minutes" : v / 60 + (v == 60 ? " hour" : " hours"), c.Refresh == v, () => { c.Refresh = v; c.Save(); if (data != null) ScheduleFetchSeconds((int)Math.Max(5, v * 60 - (DateTime.UtcNow - OldestFetch).TotalSeconds)); })); }
         menu.Items.Add(every);
         menu.Items.Add(new ToolStripSeparator());
 
@@ -1244,17 +1724,83 @@ class WeatherForm : Form
         Render();
     }
 
+    void SetView(int v) { c.View = v; Changed(); }
+
+    // Changing the main place: the forecasts are kept by place, so swapping needs no new fetch.
     void ChoosePlace()
     {
-        using (var dlg = new PlaceDialog(c.Place))
+        using (var dlg = new PlaceDialog(c.Place, "Kinetik Weather location"))
             if (dlg.ShowDialog() == DialogResult.OK && dlg.Result != null)
             {
-                bool newPlace = dlg.Result.Lat != c.Lat || dlg.Result.Lon != c.Lon;
                 c.Place = dlg.Result.Name; c.Lat = dlg.Result.Lat; c.Lon = dlg.Result.Lon;
-                c.Save();
-                if (newPlace && !Program.Demo) { data = Weather.LoadCache(c.Lat, c.Lon); lastError = null; Fetch(); }
-                Render();
+                c.SetOthers(c.OtherPlaces().Where(p => p.Key != c.Main.Key));
+                PlacesChanged();
             }
+    }
+
+    void AddPlace()
+    {
+        if (!c.HasPlace) { ChoosePlace(); return; }
+        using (var dlg = new PlaceDialog("", "Add a place to Kinetik Weather"))
+            if (dlg.ShowDialog() == DialogResult.OK && dlg.Result != null)
+            {
+                var p = new Place { Name = dlg.Result.Name, Lat = dlg.Result.Lat, Lon = dlg.Result.Lon };
+                if (c.AllPlaces().Any(o => o.Key == p.Key)) return;
+                var others = c.OtherPlaces(); others.Add(p);
+                c.SetOthers(others);
+                if (c.View == 0) c.View = 1; // so the new place shows
+                PlacesChanged();
+            }
+    }
+
+    void MakeMain(Place p)
+    {
+        var others = c.OtherPlaces();
+        int i = others.FindIndex(o => o.Key == p.Key);
+        if (i < 0) return;
+        others[i] = c.Main;
+        c.Place = p.Name; c.Lat = p.Lat; c.Lon = p.Lon;
+        c.SetOthers(others);
+        PlacesChanged();
+    }
+
+    void MoveOther(int i, int by)
+    {
+        var others = c.OtherPlaces();
+        int j = i + by;
+        if (i < 0 || j < 0 || i >= others.Count || j >= others.Count) return;
+        var t = others[i]; others[i] = others[j]; others[j] = t;
+        c.SetOthers(others);
+        PlacesChanged();
+    }
+
+    void RemoveOther(int i)
+    {
+        var others = c.OtherPlaces();
+        if (i < 0 || i >= others.Count) return;
+        others.RemoveAt(i);
+        c.SetOthers(others);
+        PlacesChanged();
+    }
+
+    // Saves the list, puts each kept forecast in its place's cache, and fetches any place that has none yet.
+    void PlacesChanged()
+    {
+        c.Save();
+        foreach (var p in c.AllPlaces())
+            if (!got.ContainsKey(p.Key) && !Program.Demo)
+            {
+                string json;
+                var f = Weather.LoadCache(p.Lat, p.Lon, p.Key == c.Main.Key, out json);
+                if (f == null) f = Weather.LoadCache(p.Lat, p.Lon, p.Key != c.Main.Key, out json);
+                if (f != null) { got[p.Key] = f; raw[p.Key] = json; }
+            }
+            else if (Program.Demo && !got.ContainsKey(p.Key)) got[p.Key] = Weather.Demo(got.Count);
+        foreach (var p in c.AllPlaces()) errs.Remove(p.Key);
+        SaveCaches();
+        lastError = null;
+        if (c.AllPlaces().Any(p => !got.ContainsKey(p.Key)) || Stale) Fetch();
+        Render();
     }
 }
 
@@ -1269,9 +1815,9 @@ class PlaceDialog : Form
     int searchId;
     CancellationTokenSource searchCancel;
 
-    public PlaceDialog(string current)
+    public PlaceDialog(string current, string title)
     {
-        Text = "Kinetik Weather location";
+        Text = title;
         FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen; TopMost = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
@@ -1398,9 +1944,27 @@ class Theme
         Name = name; Bg = bg; Text = text; Sub = sub; Accent = accent; Light = light;
     }
 
-    public Color Line { get { return Light ? Color.FromArgb(30, 0, 0, 0) : Color.FromArgb(28, 255, 255, 255); } }
+    public Color Line { get { return Term ? Color.FromArgb(110, Sub) : Light ? Color.FromArgb(30, 0, 0, 0) : Color.FromArgb(28, 255, 255, 255); } }
 
     static Color C(int r, int g, int b) { return Color.FromArgb(r, g, b); }
+
+    // The terminal themes (the same green, amber and yellow as Kinetik's dashboard and Kinetik Screen) draw in a
+    // monospace font unless a font is picked, and their divider lines glow in the theme's colour.
+    public bool Term { get { return IsTerm(Name); } }
+    public static bool IsTerm(string name) { return name == "Terminal" || name == "Amber terminal" || name == "Yellow terminal"; }
+    static string mono;
+    public static string Mono
+    {
+        get
+        {
+            if (mono == null)
+            {
+                mono = "Consolas";
+                try { using (var f = new Font("Cascadia Mono", 10f)) if (f.Name == "Cascadia Mono") mono = "Cascadia Mono"; } catch { }
+            }
+            return mono;
+        }
+    }
 
     public static readonly Theme[] All =
     {
@@ -1414,6 +1978,9 @@ class Theme
         new Theme("Ocean", C(12, 29, 45), C(228, 242, 250), C(128, 160, 186), C(56, 198, 232), false),
         new Theme("Sunset", C(40, 23, 35), C(250, 236, 240), C(192, 150, 172), C(255, 138, 92), false),
         new Theme("Mono", C(10, 10, 10), C(245, 245, 245), C(140, 140, 140), C(245, 245, 245), false),
+        new Theme("Terminal", C(3, 10, 5), C(90, 255, 120), C(46, 170, 80), C(205, 255, 215), false),
+        new Theme("Amber terminal", C(12, 7, 0), C(255, 182, 40), C(185, 118, 22), C(255, 232, 180), false),
+        new Theme("Yellow terminal", C(0, 0, 0), C(255, 226, 0), C(200, 178, 0), C(255, 255, 190), false),
         new Theme("Light", C(246, 246, 248), C(24, 24, 28), C(96, 96, 106), C(230, 70, 70), true),
         new Theme("Paper", C(250, 246, 236), C(52, 42, 32), C(132, 116, 96), C(204, 92, 52), true),
         new Theme("Frost", C(236, 242, 250), C(20, 30, 48), C(92, 106, 132), C(40, 120, 230), true),
