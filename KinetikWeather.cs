@@ -1980,6 +1980,8 @@ class Theme
         new Theme("Ocean", C(12, 29, 45), C(228, 242, 250), C(128, 160, 186), C(56, 198, 232), false),
         new Theme("Sunset", C(40, 23, 35), C(250, 236, 240), C(192, 150, 172), C(255, 138, 92), false),
         new Theme("Mono", C(10, 10, 10), C(245, 245, 245), C(140, 140, 140), C(245, 245, 245), false),
+        new Theme("OLED black", C(0, 0, 0), C(242, 242, 245), C(136, 136, 146), C(76, 194, 255), false),
+        new Theme("Mocha", C(30, 30, 46), C(205, 214, 244), C(147, 153, 178), C(203, 166, 247), false),
         new Theme("Terminal", C(3, 10, 5), C(90, 255, 120), C(46, 170, 80), C(205, 255, 215), false),
         new Theme("Amber terminal", C(12, 7, 0), C(255, 182, 40), C(185, 118, 22), C(255, 232, 180), false),
         new Theme("Yellow terminal", C(0, 0, 0), C(255, 226, 0), C(200, 178, 0), C(255, 255, 190), false),
@@ -1990,6 +1992,8 @@ class Theme
 
     public static Theme Get(string name)
     {
+        // "App" follows the theme and accent colour every Kinetik app shares.
+        if (name == "App") { var l = KinetikSuite.Look.Current; return new Theme("App", l.Card, l.Text, l.Sub, l.Accent, l.Light); }
         if (name == "Auto")
         {
             bool light = false;
@@ -2187,7 +2191,7 @@ class ThemePicker : Form
         BackColor = Page;
         float k = DeviceDpi / 96f;
         var flow = new FlowLayoutPanel { Left = (int)(16 * k), Top = (int)(16 * k), Width = (int)(3 * 118 * k), AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, MaximumSize = new Size((int)(3 * 118 * k), 0), WrapContents = true, BackColor = Page };
-        foreach (var name in new[] { "Auto" }.Concat(Theme.All.Select(t => t.Name)))
+        foreach (var name in new[] { "Auto", "App" }.Concat(Theme.All.Select(t => t.Name)))
         {
             var tile = new ThemeTile(name, name == current, k);
             tile.Click += (s, e) =>
@@ -2255,7 +2259,7 @@ class ThemeTile : Control
         }
         else Mini(g, inner, Theme.Get(ThemeName));
         using (var f = new Font(Draw.Family, 9f))
-            TextRenderer.DrawText(g, ThemeName == "Auto" ? "Match Windows" : ThemeName, f, new Rectangle(0, Height - I(26), Width, I(20)), selected ? ThemePicker.TextCol : ThemePicker.SubCol,
+            TextRenderer.DrawText(g, ThemeName == "Auto" ? "Match Windows" : ThemeName == "App" ? "Match app theme" : ThemeName, f, new Rectangle(0, Height - I(26), Width, I(20)), selected ? ThemePicker.TextCol : ThemePicker.SubCol,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
