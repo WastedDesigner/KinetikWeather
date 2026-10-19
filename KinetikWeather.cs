@@ -60,6 +60,8 @@ static class Program
             Backup.KeyName = "KinetikWeather"; Backup.AppTitle = "Kinetik Weather";
             if (!Demo) Backup.OfferRestore();
             var app = new WeatherForm();
+            // --settings opens the settings window once the app has started.
+            if (args.Contains("--settings")) { EventHandler once = null; once = (s2, e2) => { Application.Idle -= once; app.ShowSettings(); }; Application.Idle += once; }
             using (new KinetikSuite.Shutdown("KinetikWeather" + (Demo ? "Demo" : ""), () => { app.Close(); Application.Exit(); }))
                 Application.Run(app);
         }
@@ -1621,12 +1623,69 @@ class WeatherForm : Form
 
     void Changed() { c.Save(); Render(); }
 
+    KinetikSuite.SettingsWindow settings;
+
+    // Settings…: this app's own pages, then the Look, Placement, General and About pages every Kinetik widget shares.
+    public void ShowSettings(string page = null)
+    {
+        if (settings != null && !settings.IsDisposed) { settings.Activate(); if (page != null) settings.ShowPage(page); return; }
+        var pages = new List<KinetikSuite.SettingsWindow.Page>
+        {
+            new KinetikSuite.SettingsWindow.Page { Name = "Places", Glyph = "places", Sub = "Where the forecasts are for, and how many show at once.", Build = b =>
+            {
+                b.Section("Places");
+                var all = c.AllPlaces();
+                for (int i = 0; i < all.Count; i++)
+                {
+                    var p = all[i]; int at = i;
+                    if (i == 0) { b.Buttons(p.Name, "The main place, shown in full", b.Button("Change…", () => { ChoosePlace(); b.Refresh(); })); continue; }
+                    var buttons = new List<KinetikSuite.FlatButton> { b.Button("Make main", () => { MakeMain(p); b.Refresh(); }) };
+                    if (at > 1) buttons.Add(b.Small("↑", () => { MoveOther(at - 1, -1); b.Refresh(); }));
+                    if (at < all.Count - 1) buttons.Add(b.Small("↓", () => { MoveOther(at - 1, 1); b.Refresh(); }));
+                    buttons.Add(b.Button("Remove", () => { RemoveOther(at - 1); b.Refresh(); }));
+                    b.Buttons(p.Name, null, buttons.ToArray());
+                }
+                if (all.Count < MaxPlaces) b.Buttons("Add a place", "Up to " + MaxPlaces + " places", b.Button("Add…", () => { AddPlace(); b.Refresh(); }, true));
+                b.Section("Layout");
+                b.Choice("Show", null, new[] { "Just the main place", "The main place, others below", "Every place, compact" }, c.View, SetView, 230);
+            } },
+            new KinetikSuite.SettingsWindow.Page { Name = "Forecast", Glyph = "cloud", Sub = "What the forecast shows, its units, and how often it updates.", Build = b =>
+            {
+                b.Section("Show");
+                b.Switch("Details", "Feels like, wind, humidity and UV", c.ShowDetails, v => { c.ShowDetails = v; Changed(); });
+                b.Switch("Next hours", null, c.ShowHourly, v => { c.ShowHourly = v; Changed(); });
+                b.Switch("Chance of rain", null, c.ShowRain, v => { c.ShowRain = v; Changed(); });
+                b.Switch("Sunrise and sunset", null, c.ShowSun, v => { c.ShowSun = v; Changed(); });
+                b.Switch("Days ahead", null, c.ShowDaily, v => { c.ShowDaily = v; Changed(); });
+                var hours = new[] { 6, 8, 12, 24 }; var days = new[] { 3, 5, 7 };
+                b.Choice("Hours ahead", "24 shows every other hour", hours.Select(v => v + " hours").ToArray(), Array.IndexOf(hours, c.Hours), i => { c.Hours = hours[i]; Changed(); }, 140);
+                b.Choice("Days ahead", null, days.Select(v => v + " days").ToArray(), Array.IndexOf(days, c.Days), i => { c.Days = days[i]; Changed(); }, 140);
+                b.Section("Units");
+                b.Choice("Temperature", null, new[] { "°C", "°F" }, c.Fahrenheit ? 1 : 0, i => { c.Fahrenheit = i == 1; Changed(); }, 120);
+                b.Choice("Wind speed", null, new[] { "km/h", "mph", "m/s" }, c.Wind, i => { c.Wind = i; Changed(); }, 120);
+                b.Switch("24-hour time", null, c.Use24h, v => { c.Use24h = v; Changed(); });
+                b.Section("Updates");
+                var every = new[] { 15, 30, 60, 120 };
+                b.Choice("Update every", null, every.Select(v => v < 60 ? v + " minutes" : v / 60 + (v == 60 ? " hour" : " hours")).ToArray(), Array.IndexOf(every, c.Refresh), i =>
+                {
+                    int v = every[i]; c.Refresh = v; c.Save();
+                    if (data != null) ScheduleFetchSeconds((int)Math.Max(5, v * 60 - (DateTime.UtcNow - OldestFetch).TotalSeconds));
+                }, 140);
+                b.Buttons("Forecast", "Weather data by Open-Meteo.com", b.Button("Refresh now", Fetch), b.Button("Radar map", OpenMap));
+            } },
+        };
+        pages.AddRange(Common().ForSettings().Pages());
+        settings = new KinetikSuite.SettingsWindow("Kinetik Weather", Program.Version, pages, page);
+        settings.Show();
+    }
+
     // The look, placement, startup and backup options, shared word for word with the other Kinetik apps.
     CommonMenu Common()
     {
         return new CommonMenu
         {
             Title = "Kinetik Weather", Version = Program.Version,
+            OpenSettings = () => ShowSettings(),
             OpenTheme = () =>
             {
                 if (picker != null && !picker.IsDisposed) { picker.Activate(); return; }
@@ -2475,6 +2534,21 @@ class CommonMenu
         items.Add(new ToolStripSeparator());
         items.Add(new ToolStripMenuItem(Title + " " + Version) { Enabled = false });
         if (Exit != null) items.Add(Item("Exit", false, Exit));
+    }
+
+    // The same options as the shared pages of a settings window (Look, Placement, General, About).
+    public KinetikSuite.SettingsWindow.Common ForSettings()
+    {
+        return new KinetikSuite.SettingsWindow.Common
+        {
+            Title = Title, Version = Version, OpenTheme = OpenTheme,
+            Scale = Scale, SetScale = SetScale, Scales = Scales, Widths = Widths, CardWidth = CardWidth, SetCardWidth = SetCardWidth,
+            FontName = FontName, SetFontName = SetFontName, Fonts = Fonts.Where(HasFont).ToArray(),
+            Opacity = Opacity, SetOpacity = SetOpacity, Opacities = Opacities,
+            Layer = Layer, SetLayer = SetLayer, Locked = Locked, SetLocked = SetLocked, LockText = LockText,
+            ClickThrough = ClickThrough, SetClickThrough = SetClickThrough, Snap = Snap, SetSnap = SetSnap,
+            RunAtStartup = RunAtStartup, SetRunAtStartup = SetRunAtStartup, BackUp = BackUp, Restore = Restore, LastBackup = LastBackup,
+        };
     }
 
     public void AddAll(ToolStripItemCollection items) { AddLook(items); AddEnd(items); }
