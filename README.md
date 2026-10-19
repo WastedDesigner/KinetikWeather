@@ -30,7 +30,7 @@ It's a small portable app with no installer. It's a companion to [Kinetik](https
 - **Several places at once:** add up to eight under right-click → Places. Show just the main place, the main place in full with the others as compact rows below it, or every place as a compact row (local time, conditions, the next 12 hours as a little line, and the day's range). Click a row to make that place the main one
 - **Works offline:** the last forecast is kept, so the widget fills in at once at startup and keeps showing it without internet
 - **°C or °F, km/h, mph or m/s, 12- or 24-hour time**
-- **Themes** in Kinetik's style, including green, amber and yellow **terminal** themes (monospace text and line-drawn icons), a choice of fonts, size and background opacity
+- **Themes** in the Kinetik apps' style, including green, amber and yellow **terminal** themes (monospace text and line-drawn icons), a choice of fonts, size and background opacity
 - **Placement:** on the desktop, a normal window or always on top; drag anywhere, snap to edges, lock, click-through
 - **Double-click** for a live rain radar map of your place (Windy.com)
 - **Settings backup** next to the exe, offered again on a fresh Windows
