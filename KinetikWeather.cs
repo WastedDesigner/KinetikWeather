@@ -1817,6 +1817,8 @@ class PlaceDialog : Form
 
     public PlaceDialog(string current, string title)
     {
+
+        HandleCreated += (s, e) => KinetikSuite.Look.Current.Window(Handle); // title bar in the Kinetik apps' theme
         Text = title;
         FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen; TopMost = true;
@@ -1824,14 +1826,14 @@ class PlaceDialog : Form
         Font = new Font("Segoe UI", 9.5f);
         AutoScaleMode = AutoScaleMode.Font;
         ClientSize = new Size(460, 420);
-        BackColor = Color.FromArgb(27, 31, 44); ForeColor = Color.FromArgb(232, 236, 244);
-        Color field = Color.FromArgb(40, 47, 66);
+        BackColor = KinetikSuite.Look.Current.Card; ForeColor = KinetikSuite.Look.Current.Text;
+        Color field = KinetikSuite.Look.Current.Hover;
 
         Controls.Add(new Label { Text = "Search for a town or city, or type coordinates (-37.81, 144.96):", Left = 12, Top = 12, AutoSize = true });
         search = new TextBox { Left = 12, Top = 36, Width = 350, BackColor = field, ForeColor = ForeColor, BorderStyle = BorderStyle.FixedSingle, Text = current };
         find = new Button { Text = "Search", Left = 372, Top = 34, Width = 76, FlatStyle = FlatStyle.Flat };
         list = new ListBox { Left = 12, Top = 68, Width = 436, Height = 230, BackColor = field, ForeColor = ForeColor, BorderStyle = BorderStyle.FixedSingle, IntegralHeight = false };
-        status = new Label { Left = 12, Top = 302, Width = 436, Height = 20, ForeColor = Color.FromArgb(150, 158, 180) };
+        status = new Label { Left = 12, Top = 302, Width = 436, Height = 20, ForeColor = KinetikSuite.Look.Current.Sub };
         Controls.Add(new Label { Text = "Name shown on the widget:", Left = 12, Top = 326, AutoSize = true });
         name = new TextBox { Left = 12, Top = 348, Width = 436, BackColor = field, ForeColor = ForeColor, BorderStyle = BorderStyle.FixedSingle };
         var ok = new Button { Text = "Use this place", Left = 252, Top = 384, Width = 115, FlatStyle = FlatStyle.Flat };
@@ -2128,7 +2130,9 @@ sealed class ShadowCache : IDisposable
 
 class DarkColors : ProfessionalColorTable
 {
-    static readonly Color Bg = Color.FromArgb(27, 31, 44), Hi = Color.FromArgb(40, 47, 66), Edge = Color.FromArgb(52, 60, 82);
+    static Color Bg { get { return KinetikSuite.Look.Current.Card; } }
+    static Color Hi { get { return KinetikSuite.Look.Current.Hover; } }
+    static Color Edge { get { return KinetikSuite.Look.Current.Border; } }
     public override Color ToolStripDropDownBackground { get { return Bg; } }
     public override Color ImageMarginGradientBegin { get { return Bg; } }
     public override Color ImageMarginGradientMiddle { get { return Bg; } }
@@ -2142,9 +2146,9 @@ class DarkColors : ProfessionalColorTable
     public override Color MenuItemPressedGradientEnd { get { return Hi; } }
     public override Color SeparatorDark { get { return Edge; } }
     public override Color SeparatorLight { get { return Edge; } }
-    public override Color CheckBackground { get { return Color.FromArgb(52, 96, 160); } }
-    public override Color CheckSelectedBackground { get { return Color.FromArgb(62, 110, 180); } }
-    public override Color CheckPressedBackground { get { return Color.FromArgb(62, 110, 180); } }
+    public override Color CheckBackground { get { return KinetikSuite.Look.Current.Hover; } }
+    public override Color CheckSelectedBackground { get { return KinetikSuite.Look.Current.Hover; } }
+    public override Color CheckPressedBackground { get { return KinetikSuite.Look.Current.Hover; } }
 }
 
 class DarkMenu : ToolStripProfessionalRenderer
@@ -2152,12 +2156,12 @@ class DarkMenu : ToolStripProfessionalRenderer
     public DarkMenu() : base(new DarkColors()) { RoundedEdges = false; }
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
     {
-        e.TextColor = e.Item.Enabled ? Color.FromArgb(232, 236, 244) : Color.FromArgb(110, 118, 140);
+        e.TextColor = e.Item.Enabled ? KinetikSuite.Look.Current.Text : KinetikSuite.Look.Current.Sub;
         base.OnRenderItemText(e);
     }
     protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
     {
-        e.ArrowColor = Color.FromArgb(180, 188, 205);
+        e.ArrowColor = KinetikSuite.Look.Current.Sub;
         base.OnRenderArrow(e);
     }
 }
@@ -2165,11 +2169,17 @@ class DarkMenu : ToolStripProfessionalRenderer
 // A grid of theme tiles, the same picker as the other Kinetik apps.
 class ThemePicker : Form
 {
-    public static readonly Color Page = Color.FromArgb(20, 23, 33), Card = Color.FromArgb(27, 31, 44), CardHi = Color.FromArgb(36, 41, 58), Accent = Color.FromArgb(77, 166, 255);
-    public static readonly Color TextCol = Color.FromArgb(232, 236, 244), SubCol = Color.FromArgb(150, 158, 180);
+    public static Color Page { get { return KinetikSuite.Look.Current.Bg; } }
+    public static Color Card { get { return KinetikSuite.Look.Current.Card; } }
+    public static Color CardHi { get { return KinetikSuite.Look.Current.Hover; } }
+    public static Color Accent { get { return KinetikSuite.Look.Current.Accent; } }
+    public static Color TextCol { get { return KinetikSuite.Look.Current.Text; } }
+    public static Color SubCol { get { return KinetikSuite.Look.Current.Sub; } }
 
     public ThemePicker(string current, Action<string> chosen)
     {
+
+        HandleCreated += (s, e) => KinetikSuite.Look.Current.Window(Handle); // title bar in the Kinetik apps' theme
         Text = Backup.AppTitle + " theme";
         FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen; TopMost = true; ShowInTaskbar = true;
@@ -2377,6 +2387,7 @@ class CommonMenu
 
     public string Title, Version;
     public Action OpenTheme;                                        // opens the theme picker (or the page with it)
+    public Action LookChanged;                                      // optional: after the App theme changes
     public Func<int> Scale; public Action<int> SetScale;
     public int[] Widths; public Func<int> CardWidth; public Action<int> SetCardWidth; // optional: Narrow, Normal, Wide
     public Func<string> FontName; public Action<string> SetFontName;   // optional; "" = the default font
@@ -2406,7 +2417,8 @@ class CommonMenu
     // Appearance and placement: Theme, Size, Font, Background opacity, Placement.
     public void AddLook(ToolStripItemCollection items)
     {
-        if (OpenTheme != null) items.Add(Item("Theme…", false, OpenTheme));
+        if (OpenTheme != null) items.Add(Item("Widget theme…", false, OpenTheme));
+        items.Add(KinetikSuite.Look.MenuItem(LookChanged)); // the theme of every Kinetik app's windows and menus
 
         var size = new ToolStripMenuItem("Size");
         foreach (var s in Scales) { int v = s; size.DropDownItems.Add(Item(v + "%", Scale() == v, () => SetScale(v))); }
