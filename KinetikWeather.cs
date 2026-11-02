@@ -56,7 +56,7 @@ static class Program
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            ToolStripManager.Renderer = new DarkMenu();
+            ToolStripManager.Renderer = KinetikSuite.Look.Current.MenuRenderer();
             Backup.KeyName = "KinetikWeather"; Backup.AppTitle = "Kinetik Weather";
             if (!Demo) Backup.OfferRestore();
             var app = new WeatherForm();
@@ -76,7 +76,7 @@ class Settings
     static readonly bool Metric = RegionInfo.CurrentRegion.IsMetric;
     public int X = int.MinValue, Y = int.MinValue, Width = 340, Scale = 100, Opacity = CommonMenu.DefaultOpacity, Layer = 0;
     public int Hours = 12, Days = 5, Refresh = 30, Wind = Metric ? 0 : 1; // Wind: 0 km/h, 1 mph, 2 m/s
-    public bool Locked, Snap = true, ClickThrough, Fahrenheit = !Metric;
+    public bool Locked, Snap = true, ClickThrough, Fahrenheit = !Metric, Animate = true;
     public bool ShowHourly = true, ShowRain = true, ShowSun = true, ShowDaily = true, ShowDetails = true;
     public int View = 1; // 0 just the main place, 1 the main place in full with the others as rows below, 2 every place as a row
     public bool Use24h = CultureInfo.CurrentCulture.DateTimeFormat.ShortTimePattern.Contains("H");
@@ -447,11 +447,14 @@ static class WxIcon
 {
     public static readonly Color Sun = Color.FromArgb(255, 196, 64), Rain = Color.FromArgb(77, 166, 255), Bolt = Color.FromArgb(255, 214, 90);
     public static Color Mono = Color.Empty, MonoBg = Color.Black;
+    public static double T = -1; // seconds on the animation clock; negative draws the still icons
+    static float Sway;           // how far this icon's clouds have drifted sideways, in pixels
 
     public static void Paint(Graphics g, RectangleF r, int code, bool day, bool light)
     {
         float s = Math.Min(r.Width, r.Height), x = r.X + (r.Width - s) / 2, y = r.Y + (r.Height - s) / 2;
-        bool mono = !Mono.IsEmpty;
+        bool mono = !Mono.IsEmpty, an = T >= 0;
+        Sway = an ? (float)Math.Sin(T * 0.8) * s * 0.025f : 0;
         Color cloud = mono ? Mono : light ? Color.FromArgb(160, 168, 184) : Color.FromArgb(226, 231, 241);
         Color cloudDark = mono ? Mono : light ? Color.FromArgb(112, 120, 138) : Color.FromArgb(150, 158, 178);
         Color snow = mono ? Mono : light ? Color.FromArgb(120, 160, 215) : Color.FromArgb(236, 242, 255);
@@ -464,10 +467,11 @@ static class WxIcon
         if (code == 45 || code == 48)
         {
             Cloud(g, new RectangleF(x + s * 0.12f, y + s * 0.12f, s * 0.76f, s * 0.46f), cloud, s);
+            float fs = an ? (float)Math.Sin(T * 0.9) * s * 0.05f : 0; // the banks of fog slide past each other
             using (var pen = new Pen(cloudDark, s * (mono ? 0.05f : 0.065f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
             {
-                g.DrawLine(pen, x + s * 0.16f, y + s * 0.7f, x + s * 0.84f, y + s * 0.7f);
-                g.DrawLine(pen, x + s * 0.26f, y + s * 0.84f, x + s * 0.74f, y + s * 0.84f);
+                g.DrawLine(pen, x + s * 0.16f + fs, y + s * 0.7f, x + s * 0.84f + fs, y + s * 0.7f);
+                g.DrawLine(pen, x + s * 0.26f - fs, y + s * 0.84f, x + s * 0.74f - fs, y + s * 0.84f);
             }
             return;
         }
@@ -481,7 +485,9 @@ static class WxIcon
         {
             var p = new[] { new PointF(x + s * 0.54f, top - s * 0.06f), new PointF(x + s * 0.38f, top + s * 0.17f), new PointF(x + s * 0.5f, top + s * 0.17f),
                             new PointF(x + s * 0.42f, top + s * 0.34f), new PointF(x + s * 0.64f, top + s * 0.1f), new PointF(x + s * 0.52f, top + s * 0.1f), new PointF(x + s * 0.6f, top - s * 0.06f) };
-            using (var b = new SolidBrush(bolt)) g.FillPolygon(b, p);
+            double ph = T % 3.2; // two quick flashes, then dim until the next storm beat
+            int ba = !an || ph < 0.12 || (ph > 0.25 && ph < 0.33) ? 255 : 110;
+            using (var b = new SolidBrush(Color.FromArgb(ba, bolt))) g.FillPolygon(b, p);
             return;
         }
         int n = code == 51 || code == 61 || code == 71 || code == 80 || code == 85 ? 2 : 3;
@@ -489,10 +495,19 @@ static class WxIcon
         for (int i = 0; i < n; i++)
         {
             float dx = x0 + span * (n == 1 ? 0.5f : i / (float)(n - 1)), dy = top + (i % 2) * s * 0.08f;
+            int a = 255;
+            if (an)
+            {
+                // each drop falls from the cloud and fades out, staggered so there's always one coming
+                double ph = (T * (snowy ? 0.5 : 1.2) + i / (double)n) % 1.0;
+                dy += (float)ph * s * (showers ? 0.12f : 0.2f);
+                a = Math.Max(0, (int)(255 * Math.Sin(ph * Math.PI)));
+                if (snowy) dx += (float)Math.Sin(T * 2 + i * 2) * s * 0.03f;
+            }
             if (snowy)
-                using (var b = new SolidBrush(snow)) g.FillEllipse(b, dx - s * 0.05f, dy, s * 0.1f, s * 0.1f);
+                using (var b = new SolidBrush(Color.FromArgb(a, snow))) g.FillEllipse(b, dx - s * 0.05f, dy, s * 0.1f, s * 0.1f);
             else
-                using (var pen = new Pen(rain, s * 0.07f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                using (var pen = new Pen(Color.FromArgb(a, rain), s * 0.07f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                     g.DrawLine(pen, dx + s * 0.04f, dy, dx - s * 0.03f, dy + (code >= 51 && code <= 57 ? s * 0.08f : s * 0.16f));
         }
     }
@@ -515,9 +530,10 @@ static class WxIcon
                 using (var pen = new Pen(mono ? Mono : Sun, Math.Max(1, s * 0.05f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                     for (int i = 0; i < 8; i++)
                     {
-                        double a = i * Math.PI / 4;
-                        float c = (float)Math.Cos(a), sn = (float)Math.Sin(a);
-                        g.DrawLine(pen, cx + c * rad * 1.45f, cy + sn * rad * 1.45f, cx + c * rad * 1.8f, cy + sn * rad * 1.8f);
+                        // the rays turn slowly and each breathes in and out
+                        double a = i * Math.PI / 4 + (T >= 0 ? T * 0.35 : 0);
+                        float c = (float)Math.Cos(a), sn = (float)Math.Sin(a), br = T >= 0 ? 0.1f * (float)Math.Sin(T * 2.2 + i) : 0;
+                        g.DrawLine(pen, cx + c * rad * (1.45f + br), cy + sn * rad * (1.45f + br), cx + c * rad * (1.8f + br), cy + sn * rad * (1.8f + br));
                     }
             return;
         }
@@ -538,6 +554,7 @@ static class WxIcon
     // A cloud filling r: three bumps on a rounded base.
     static void Cloud(Graphics g, RectangleF r, Color col, float s)
     {
+        r.X += Sway;
         using (var p = new GraphicsPath { FillMode = FillMode.Winding })
         {
             float w = r.Width, h = r.Height;
@@ -580,7 +597,8 @@ class WeatherForm : Form
 
     readonly Settings c = Settings.Load();
     readonly DibSurface surface = new DibSurface();
-    readonly System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer(), fetchTimer = new System.Windows.Forms.Timer();
+    readonly System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer(), fetchTimer = new System.Windows.Forms.Timer(), anim = new System.Windows.Forms.Timer { Interval = 50 };
+    readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
     readonly NotifyIcon tray = new NotifyIcon();
     readonly ContextMenuStrip menu = KinetikSuite.MenuFocus.Attach(new ContextMenuStrip());
     int layer, winW, winH, margin;
@@ -614,6 +632,7 @@ class WeatherForm : Form
         tray.DoubleClick += (s, e) => Fetch();
         tray.Visible = Program.ShotPath == null;
         tick.Tick += (s, e) => { Tick(); Render(); };
+        anim.Tick += (s, e) => { if (!dragging) Render(); }; // 20 frames a second, only while animation is on
         fetchTimer.Tick += (s, e) => { fetchTimer.Stop(); Fetch(); };
 
         if (Program.Demo && Program.DemoPlace != null)
@@ -648,7 +667,7 @@ class WeatherForm : Form
         {
             BeginInvoke((Action)(() =>
             {
-                if (e.Reason == SessionSwitchReason.SessionLock) tick.Stop();
+                if (e.Reason == SessionSwitchReason.SessionLock) { tick.Stop(); anim.Stop(); }
                 else if (e.Reason == SessionSwitchReason.SessionUnlock) { Tick(); Render(); if (Stale) Fetch(); }
             }));
         }
@@ -744,7 +763,7 @@ class WeatherForm : Form
         {
             SystemEvents.SessionSwitch -= OnSession; SystemEvents.PowerModeChanged -= OnPower;
             System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged -= OnNetwork;
-            tick.Dispose(); fetchTimer.Dispose(); tray.Dispose(); menu.Dispose(); DisposeFonts(); shadow.Dispose(); if (textLayer != null) textLayer.Dispose();
+            tick.Dispose(); fetchTimer.Dispose(); anim.Dispose(); tray.Dispose(); menu.Dispose(); DisposeFonts(); shadow.Dispose(); if (textLayer != null) textLayer.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -1029,6 +1048,9 @@ class WeatherForm : Form
         SetWindowLong(Handle, -20, wantThrough ? ex | 0x20 : ex & ~0x20); // TRANSPARENT: clicks fall through
 
         EnsurePosition();
+        bool animate = c.Animate && Program.ShotPath == null;
+        WxIcon.T = animate ? clock.Elapsed.TotalSeconds : -1;
+        anim.Enabled = animate && data != null;
         var bmp = surface.Canvas(winW, winH);
         using (var g = Graphics.FromImage(bmp)) PaintCard(g, cardW, cardH, pad);
         surface.Push(Handle, c.X, c.Y);
@@ -1657,6 +1679,7 @@ class WeatherForm : Form
                 b.Switch("Chance of rain", null, c.ShowRain, v => { c.ShowRain = v; Changed(); });
                 b.Switch("Sunrise and sunset", null, c.ShowSun, v => { c.ShowSun = v; Changed(); });
                 b.Switch("Days ahead", null, c.ShowDaily, v => { c.ShowDaily = v; Changed(); });
+                b.Switch("Animated icons", "Rain falls, the sun turns, clouds drift", c.Animate, v => { c.Animate = v; Changed(); });
                 var hours = new[] { 6, 8, 12, 24 }; var days = new[] { 3, 5, 7 };
                 b.Choice("Hours ahead", "24 shows every other hour", hours.Select(v => v + " hours").ToArray(), Array.IndexOf(hours, c.Hours), i => { c.Hours = hours[i]; Changed(); }, 140);
                 b.Choice("Days ahead", null, days.Select(v => v + " days").ToArray(), Array.IndexOf(days, c.Days), i => { c.Days = days[i]; Changed(); }, 140);
@@ -1751,6 +1774,7 @@ class WeatherForm : Form
         show.DropDownItems.Add(Item("Chance of rain", c.ShowRain, () => { c.ShowRain = !c.ShowRain; Changed(); }));
         show.DropDownItems.Add(Item("Sunrise and sunset", c.ShowSun, () => { c.ShowSun = !c.ShowSun; Changed(); }));
         show.DropDownItems.Add(Item("Days ahead", c.ShowDaily, () => { c.ShowDaily = !c.ShowDaily; Changed(); }));
+        show.DropDownItems.Add(Item("Animated icons", c.Animate, () => { c.Animate = !c.Animate; Changed(); }));
         show.DropDownItems.Add(new ToolStripSeparator());
         foreach (var n in new[] { 6, 8, 12, 24 }) { int v = n; show.DropDownItems.Add(Item("Next " + v + " hours" + (v == 24 ? " (every other hour)" : ""), c.Hours == v, () => { c.Hours = v; Changed(); })); }
         show.DropDownItems.Add(new ToolStripSeparator());
