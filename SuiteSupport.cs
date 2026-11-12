@@ -386,10 +386,10 @@ namespace KinetikSuite
         public Shutdown(string id, Action close)
         {
             var security = new System.Security.AccessControl.EventWaitHandleSecurity();
-            // No integrity label ("S:(ML…)"): setting one needs a privilege apps don't hold, and the event gets this process's level anyway.
+            // No integrity label ("S:(MLâ€¦)"): setting one needs a privilege apps don't hold, and the event gets this process's level anyway.
             security.SetSecurityDescriptorSddlForm("D:(A;;0x1F0003;;;SY)(A;;0x1F0003;;;BA)(A;;0x1F0003;;;" + System.Security.Principal.WindowsIdentity.GetCurrent().User.Value + ")");
             bool created;
-            signal = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\" + id + ".Shutdown", out created, security);
+            signal = EventWaitHandleAcl.Create(false, EventResetMode.AutoReset, @"Local\" + id + ".Shutdown", out created, security);
             // A registered wait sleeps until requested instead of waking every widget four times a second.
             dispatcher = new System.Windows.Forms.Control();
             dispatcher.CreateControl();
@@ -430,7 +430,18 @@ namespace KinetikSuite
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
         public static T Attach<T>(T menu) where T : System.Windows.Forms.ToolStripDropDown
         {
-            menu.Opened += (s, e) => { try { SetForegroundWindow(menu.Handle); } catch { } };
+            menu.Opening += (s, e) =>
+            {
+                float k = menu.DeviceDpi / 96f;
+                menu.Padding = new System.Windows.Forms.Padding((int)(4 * k));
+                foreach (System.Windows.Forms.ToolStripItem i in menu.Items)
+                    if (i is System.Windows.Forms.ToolStripMenuItem) i.Padding = new System.Windows.Forms.Padding((int)(6 * k), (int)(4 * k), (int)(6 * k), (int)(4 * k));
+            };
+            menu.Opened += (s, e) =>
+            {
+                try { SetForegroundWindow(menu.Handle); } catch { }
+                try { using (var p = Paths.Round(new System.Drawing.RectangleF(0, 0, menu.Width, menu.Height), menu.DeviceDpi / 96f * 8)) menu.Region = new System.Drawing.Region(p); } catch { }
+            };
             return menu;
         }
     }
@@ -451,7 +462,7 @@ namespace KinetikSuite
 
         static System.Drawing.Color C(int r, int g, int b) { return System.Drawing.Color.FromArgb(r, g, b); }
 
-        // name → page, sidebar, card, hover, field, border, text, secondary text
+        // name â†’ page, sidebar, card, hover, field, border, text, secondary text
         static readonly Dictionary<string, System.Drawing.Color[]> palettes = new Dictionary<string, System.Drawing.Color[]>
         {
             { "Graphite", new[] { C(17, 17, 19), C(17, 17, 19), C(26, 26, 29), C(34, 34, 38), C(31, 31, 35), C(44, 44, 50), C(236, 236, 240), C(142, 142, 152) } },
@@ -464,7 +475,7 @@ namespace KinetikSuite
             { "Paper", new[] { C(247, 244, 238), C(247, 244, 238), C(253, 251, 247), C(242, 237, 228), C(255, 255, 255), C(226, 219, 206), C(46, 38, 30), C(120, 106, 90) } },
         };
 
-        // name → colour on dark themes, colour on light themes
+        // name â†’ colour on dark themes, colour on light themes
         static readonly Dictionary<string, System.Drawing.Color[]> accents = new Dictionary<string, System.Drawing.Color[]>
         {
             { "Sky", new[] { C(76, 194, 255), C(0, 110, 200) } },
@@ -607,7 +618,7 @@ namespace KinetikSuite
         {
             var menu = new System.Windows.Forms.ToolStripMenuItem("App theme");
             menu.DropDownOpening += (s, e) => { menu.DropDownItems.Clear(); FillMenu(menu.DropDownItems, changed); };
-            menu.DropDownItems.Add("…"); // replaced as it opens
+            menu.DropDownItems.Add("â€¦"); // replaced as it opens
             return menu;
         }
 
@@ -662,6 +673,27 @@ namespace KinetikSuite
     {
         static Look look { get { return Look.Current; } }
         public LookMenu() : base(new LookColours()) { RoundedEdges = false; }
+        protected override void OnRenderToolStripBackground(System.Windows.Forms.ToolStripRenderEventArgs e) { e.Graphics.Clear(look.Card); }
+        protected override void OnRenderImageMargin(System.Windows.Forms.ToolStripRenderEventArgs e) { }
+        // A hairline around the menu, rounded to match the window's rounded corners.
+        protected override void OnRenderToolStripBorder(System.Windows.Forms.ToolStripRenderEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            var r = new System.Drawing.RectangleF(0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+            Paths.Stroke(g, r, e.ToolStrip.Region != null ? e.ToolStrip.DeviceDpi / 96f * 8 : 0.5f, look.Border);
+        }
+        // The item under the mouse gets a soft accent-tinted pill instead of a flat full-width bar.
+        protected override void OnRenderMenuItemBackground(System.Windows.Forms.ToolStripItemRenderEventArgs e)
+        {
+            var it = e.Item; if (!it.Enabled || !(it.Selected || it.Pressed)) return;
+            var g = e.Graphics; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            Paths.Fill(g, new System.Drawing.RectangleF(3, 1, it.Width - 6, it.Height - 2), 6, System.Drawing.Color.FromArgb(46, look.Accent));
+        }
+        protected override void OnRenderSeparator(System.Windows.Forms.ToolStripSeparatorRenderEventArgs e)
+        {
+            int y = e.Item.Height / 2;
+            using (var p = new System.Drawing.Pen(look.Border)) e.Graphics.DrawLine(p, 12, y, e.Item.Width - 12, y);
+        }
         protected override void OnRenderItemText(System.Windows.Forms.ToolStripItemTextRenderEventArgs e)
         {
             e.TextColor = e.Item.Enabled ? look.Text : look.Sub;
@@ -792,8 +824,8 @@ namespace KinetikSuite
             if (!Enabled) { fill = l.Field; text = l.Sub; }
             Paths.Fill(g, r, 6 * scale, fill);
             if (!accent || !Enabled) Paths.Stroke(g, r, 6 * scale, Focused && ShowFocusCues ? l.Accent : l.Border);
-            // ↑ and ↓ are drawn as chevrons: the font's arrows can come out as coloured emoji.
-            if (Text == "↑" || Text == "↓") Paths.Chevron(g, new System.Drawing.RectangleF(0, 0, Width - 1, Height - 1), text, Text == "↑");
+            // â†‘ and â†“ are drawn as chevrons: the font's arrows can come out as coloured emoji.
+            if (Text == "â†‘" || Text == "â†“") Paths.Chevron(g, new System.Drawing.RectangleF(0, 0, Width - 1, Height - 1), text, Text == "â†‘");
             else System.Windows.Forms.TextRenderer.DrawText(g, Text, Font, ClientRectangle, text,
                 System.Windows.Forms.TextFormatFlags.HorizontalCenter | System.Windows.Forms.TextFormatFlags.VerticalCenter | System.Windows.Forms.TextFormatFlags.SingleLine | System.Windows.Forms.TextFormatFlags.NoPrefix);
         }
@@ -1154,7 +1186,7 @@ namespace KinetikSuite
                 list.Add(new Page { Name = "Look", Glyph = "look", Sub = "Theme, size, font and background of the widget.", Build = b =>
                 {
                     b.Section("Theme");
-                    if (OpenTheme != null) b.Buttons("Widget theme", "Its colours, including Match app theme", b.Button("Choose…", OpenTheme));
+                    if (OpenTheme != null) b.Buttons("Widget theme", "Its colours, including Match app theme", b.Button("Chooseâ€¦", OpenTheme));
                     b.Section("Size and text");
                     if (Scale != null) b.Choice("Size", null, Scales.Select(v => v + "%").ToArray(), Array.IndexOf(Scales, Scale()), i => SetScale(Scales[i]), 120);
                     if (Widths != null && CardWidth != null)
@@ -1187,7 +1219,7 @@ namespace KinetikSuite
                     if (BackUp != null)
                     {
                         b.Section("Backup");
-                        b.Buttons("Settings backup", "Last backup: " + (LastBackup != null ? LastBackup() : "–"), b.Button("Back up", () => { BackUp(); b.Refresh(); }), b.Button("Restore…", Restore));
+                        b.Buttons("Settings backup", "Last backup: " + (LastBackup != null ? LastBackup() : "â€“"), b.Button("Back up", () => { BackUp(); b.Refresh(); }), b.Button("Restoreâ€¦", Restore));
                     }
                 } });
                 list.Add(new Page { Name = "About", Glyph = "about", Sub = "Version and licence.", Build = b =>
