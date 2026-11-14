@@ -22,16 +22,17 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kinetik Weather")]
 [assembly: AssemblyProduct("Kinetik Weather")]
 [assembly: AssemblyCopyright("Copyright © 2026 Akila Sella Hennedige")]
-[assembly: AssemblyVersion("2.0.1.0")]
-[assembly: AssemblyFileVersion("2.0.1.0")]
+[assembly: AssemblyVersion("2.1.0.0")]
+[assembly: AssemblyFileVersion("2.1.0.0")]
 
 static class Program
 {
-    public const string Version = "2.0.1";
+    public const string Version = "2.1.0";
     // --demo: a made-up forecast, nothing fetched, read from or saved to this PC. "--theme Name" picks its theme.
     // "--shot file.png" draws the demo card into a PNG and quits (for the README screenshots). "--view 0|1|2" picks how
     // the demo's four places are shown (see Settings.View).
-    public static bool Demo;
+    // "--alerts" adds a thunderstorm to the demo forecast, so the alert banner shows.
+    public static bool Demo, DemoAlerts;
     public static int DemoView = 1;
     public static string DemoTheme, ShotPath, DemoPlace; // DemoPlace: "lat,lon" fetched live instead of the made-up forecast
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
@@ -44,6 +45,7 @@ static class Program
         if (ti >= 0 && ti + 1 < args.Length) DemoTheme = args[ti + 1];
         int si = Array.IndexOf(args, "--shot");
         if (si >= 0 && si + 1 < args.Length) { ShotPath = Path.GetFullPath(args[si + 1]); Demo = true; }
+        DemoAlerts = args.Contains("--alerts");
         int pi = Array.IndexOf(args, "--place");
         if (pi >= 0 && pi + 1 < args.Length) DemoPlace = args[pi + 1];
         int vi = Array.IndexOf(args, "--view");
@@ -78,6 +80,7 @@ class Settings
     public int Hours = 12, Days = 5, Refresh = 30, Wind = Metric ? 0 : 1; // Wind: 0 km/h, 1 mph, 2 m/s
     public bool Locked, Snap = true, ClickThrough, Fahrenheit = !Metric, Animate = true;
     public bool ShowHourly = true, ShowRain = true, ShowSun = true, ShowDaily = true, ShowDetails = true;
+    public bool RainAlert = true, ShowWarnings = true, ShowAir = true, FeelsHero; // FeelsHero: the big temperature is the feels-like one
     public int View = 1; // 0 just the main place, 1 the main place in full with the others as rows below, 2 every place as a row
     public bool Use24h = CultureInfo.CurrentCulture.DateTimeFormat.ShortTimePattern.Contains("H");
     public string ThemeName = "Midnight", FontName = ""; // "" = Segoe UI Variable Text
@@ -201,18 +204,23 @@ class Settings
 }
 
 // ======================================================================= Forecast data (Open-Meteo)
-class Hour { public DateTime T; public double Temp, Pop; public int Code; public bool Day; }
+class Hour { public DateTime T; public double Temp, Pop, Rain = double.NaN, Gust = double.NaN; public int Code; public bool Day; } // Rain mm in the hour, Gust km/h
+class Slot { public DateTime T; public double Mm; }   // rain in the 15 minutes up to T
+class AirQ { public double Aqi, Pm25; }               // US air quality index and PM2.5
+class Warn { public int Level; public string Kind; public DateTime When; public double Value; } // Level 1 = watch out, 2 = severe
 class DayF { public DateTime Date, Rise, Set; public double Max, Min, Pop, Uv = double.NaN; public int Code; }
 class Place { public string Name, Lat, Lon; public string Key { get { return Lat + "," + Lon; } } }
 
 class Forecast
 {
     public double Temp, Feels, Wind, WindDir, Humidity; // °C, km/h, degrees, %
+    public double RainNow = double.NaN;                 // mm in the current 15 minutes
     public int Code, Offset;                            // WMO weather code; the place's offset from UTC in seconds
     public bool IsDay;
     public DateTime Fetched;                            // UTC
     public List<Hour> Hours = new List<Hour>();          // the place's own local times
     public List<DayF> Days = new List<DayF>();
+    public List<Slot> Mins = new List<Slot>();           // the next two hours in 15-minute steps
 
     public DateTime PlaceNow { get { return DateTime.UtcNow.AddSeconds(Offset); } }
 }
@@ -224,8 +232,9 @@ static class Weather
     public static string Url(string lat, string lon)
     {
         return "https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon +
-            "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m" +
-            "&hourly=temperature_2m,precipitation_probability,weather_code,is_day" +
+            "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m,precipitation" +
+            "&hourly=temperature_2m,precipitation_probability,weather_code,is_day,precipitation,wind_gusts_10m" +
+            "&minutely_15=precipitation&forecast_minutely_15=8" +
             "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset,uv_index_max" +
             "&timezone=auto&forecast_days=8";
     }
@@ -266,11 +275,17 @@ static class Weather
         f.Humidity = D(Val(cur, "relative_humidity_2m")); f.Wind = D(Val(cur, "wind_speed_10m")); f.WindDir = D(Val(cur, "wind_direction_10m"));
         var code = D(Val(cur, "weather_code")); f.Code = double.IsNaN(code) ? -1 : (int)code;
         f.IsDay = D(Val(cur, "is_day")) == 1;
+        f.RainNow = D(Val(cur, "precipitation"));
 
         var h = Obj(root, "hourly");
-        object[] ht = Arr(h, "time"), temp = Arr(h, "temperature_2m"), pop = Arr(h, "precipitation_probability"), hc = Arr(h, "weather_code"), day = Arr(h, "is_day");
+        object[] ht = Arr(h, "time"), temp = Arr(h, "temperature_2m"), pop = Arr(h, "precipitation_probability"), hc = Arr(h, "weather_code"), day = Arr(h, "is_day"),
+                 rn = Arr(h, "precipitation"), gs = Arr(h, "wind_gusts_10m");
         for (int i = 0; i < ht.Length; i++)
-            f.Hours.Add(new Hour { T = Time(ht[i]), Temp = D(temp, i), Pop = D(pop, i), Code = I(hc, i), Day = D(day, i) == 1 });
+            f.Hours.Add(new Hour { T = Time(ht[i]), Temp = D(temp, i), Pop = D(pop, i), Code = I(hc, i), Day = D(day, i) == 1, Rain = D(rn, i), Gust = D(gs, i) });
+        var mn15 = Obj(root, "minutely_15");
+        object[] mt = Arr(mn15, "time"), mp = Arr(mn15, "precipitation");
+        for (int i = 0; i < mt.Length && i < mp.Length; i++)
+            try { f.Mins.Add(new Slot { T = Time(mt[i]), Mm = D(mp, i) }); } catch { }
 
         var d = Obj(root, "daily");
         object[] dt = Arr(d, "time"), dc = Arr(d, "weather_code"), mx = Arr(d, "temperature_2m_max"), mn = Arr(d, "temperature_2m_min"),
@@ -284,6 +299,76 @@ static class Weather
         if (f.Hours.Count == 0 || double.IsNaN(f.Temp)) throw new FormatException("The forecast came back empty");
         return f;
     }
+
+    // ---- alerts worked out from the forecast itself. Open-Meteo has no official warnings, so these are "watch out" notes,
+    // not government warnings. They cover the next 24 hours, plus today's and tomorrow's temperature extremes.
+    // shortcut: the thresholds are fixed (and are sensible for most places); make them settings if they're wrong for yours.
+    public static List<Warn> Warnings(Forecast f)
+    {
+        var list = new List<Warn>();
+        var now = f.PlaceNow;
+        Action<string, int, DateTime, double> add = (kind, level, when, value) =>
+        {
+            var have = list.FirstOrDefault(w => w.Kind == kind);
+            if (have == null) list.Add(new Warn { Kind = kind, Level = level, When = when, Value = value });
+            else if (level > have.Level) { have.Level = level; have.When = when; have.Value = value; } // keeps the first time at the worst level
+        };
+        foreach (var h in f.Hours.Where(h => h.T.AddHours(1) > now && h.T < now.AddHours(24)))
+        {
+            if (h.Code >= 96) add("storm", 2, h.T, 0); else if (h.Code == 95) add("storm", 1, h.T, 0);
+            if (!double.IsNaN(h.Rain)) { if (h.Rain >= 10) add("rain", 2, h.T, h.Rain); else if (h.Rain >= 4) add("rain", 1, h.T, h.Rain); }
+            if (!double.IsNaN(h.Gust)) { if (h.Gust >= 90) add("wind", 2, h.T, h.Gust); else if (h.Gust >= 65) add("wind", 1, h.T, h.Gust); }
+            if (h.Code == 75 || h.Code == 86) add("snow", 1, h.T, 0);
+            if (h.Code == 66 || h.Code == 67) add("ice", 2, h.T, 0);
+        }
+        foreach (var d in f.Days.Where(d => d.Date >= now.Date && d.Date <= now.Date.AddDays(1)))
+        {
+            if (d.Max >= 42) add("heat", 2, d.Date, d.Max); else if (d.Max >= 38) add("heat", 1, d.Date, d.Max);
+            if (d.Min <= -20) add("cold", 2, d.Date, d.Min); else if (d.Min <= -10) add("cold", 1, d.Date, d.Min);
+        }
+        return list.OrderByDescending(w => w.Level).ThenBy(w => w.When).ToList();
+    }
+
+    // Minutes until rain starts, when it's dry now and 0.1 mm or more is due within the hour (start is when it begins); -1 otherwise.
+    // shortcut: Open-Meteo's 15-minute rain is interpolated outside Europe, North America and Japan, so the timing is approximate.
+    public static int RainSoon(Forecast f, out DateTime start)
+    {
+        start = DateTime.MinValue;
+        var now = f.PlaceNow;
+        if (!double.IsNaN(f.RainNow) && f.RainNow >= 0.1 && (DateTime.UtcNow - f.Fetched).TotalMinutes < 15) return -1; // raining at the last update
+        foreach (var s in f.Mins.Where(s => s.T > now).OrderBy(s => s.T))
+        {
+            if (double.IsNaN(s.Mm) || s.Mm < 0.1) continue;
+            var from = s.T.AddMinutes(-15);
+            if (from <= now || from > now.AddMinutes(60)) return -1; // already raining, or not for an hour yet
+            start = from;
+            return (int)Math.Ceiling((from - now).TotalMinutes);
+        }
+        return -1;
+    }
+
+    public static string AirUrl(string lat, string lon)
+    {
+        return "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=" + lat + "&longitude=" + lon + "&current=us_aqi,pm2_5&timezone=auto";
+    }
+
+    public static AirQ ParseAir(string json)
+    {
+        var root = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(json) as Dictionary<string, object>;
+        var cur = Obj(root, "current");
+        var a = new AirQ { Aqi = D(Val(cur, "us_aqi")), Pm25 = D(Val(cur, "pm2_5")) };
+        if (double.IsNaN(a.Aqi)) throw new FormatException("No air quality for this place");
+        return a;
+    }
+
+    public static Color AqiColour(double aqi)
+    {
+        return aqi <= 50 ? Color.FromArgb(0, 200, 90) : aqi <= 100 ? Color.FromArgb(240, 200, 0) : aqi <= 150 ? Color.FromArgb(255, 140, 0)
+             : aqi <= 200 ? Color.FromArgb(235, 60, 60) : aqi <= 300 ? Color.FromArgb(150, 60, 200) : Color.FromArgb(130, 20, 40);
+    }
+
+    // The US AQI bands, short enough for a small tile.
+    public static string AqiWord(double aqi) { return aqi <= 50 ? "Good" : aqi <= 100 ? "Fair" : aqi <= 150 ? "Sens." : aqi <= 200 ? "Poor" : aqi <= 300 ? "V.poor" : "Hazard"; }
 
     // ---- place search (Open-Meteo geocoding)
     public class Spot
@@ -430,7 +515,12 @@ static class Weather
             double since = (t - now).TotalHours;
             double pop = since > 2 && since < 9 ? Math.Max(0, 70 - Math.Abs(since - 5) * 18) : 5 + (i * 37 % 11);
             int code = pop >= 50 ? 80 : pop >= 25 ? 3 : (t.Hour > 7 && t.Hour < 18 ? 2 : 1);
-            f.Hours.Add(new Hour { T = t, Temp = temp, Pop = Math.Round(pop / 5) * 5, Code = code, Day = t.Hour >= 6 && t.Hour < 20 });
+            f.Hours.Add(new Hour { T = t, Temp = temp, Pop = Math.Round(pop / 5) * 5, Code = code, Day = t.Hour >= 6 && t.Hour < 20, Rain = pop >= 50 ? 1.2 : 0, Gust = 24 + (i * 7) % 15 });
+        }
+        if (Program.DemoAlerts && v == 0) // a storm this evening, and a gusty hour
+        {
+            var storm = f.Hours.FirstOrDefault(h => h.T >= now.AddHours(5));
+            if (storm != null) { storm.Code = 95; storm.Gust = 78; storm.Rain = 6; }
         }
         int[] codes = { 80, 61, 3, 1, 2, 0, 95, 2 };
         double[] max = { 21, 17, 16, 19, 23, 26, 22, 20 }, min = { 11, 10, 9, 8, 12, 14, 15, 12 }, pops = { 70, 85, 30, 5, 10, 0, 60, 15 };
@@ -607,6 +697,8 @@ class WeatherForm : Form
     Point grab, downAt;
     ThemePicker picker;
     string lastError; // the main place's last fetch error, or null
+    readonly Dictionary<string, AirQ> air = new Dictionary<string, AirQ>(); // air quality by place, main place only
+    DateTime rainAlerted = DateTime.MinValue; // when the rain we last announced was due to start
 
     // Every place's forecast and the JSON it came from, by "lat,lon"; and the error from the last try for any that failed.
     readonly Dictionary<string, Forecast> got = new Dictionary<string, Forecast>();
@@ -631,7 +723,7 @@ class WeatherForm : Form
         tray.ContextMenuStrip = menu;
         tray.DoubleClick += (s, e) => Fetch();
         tray.Visible = Program.ShotPath == null;
-        tick.Tick += (s, e) => { Tick(); Render(); };
+        tick.Tick += (s, e) => { Tick(); CheckAlerts(); Render(); };
         anim.Tick += (s, e) => { if (!dragging) Render(); }; // 20 frames a second, only while animation is on
         fetchTimer.Tick += (s, e) => { fetchTimer.Stop(); Fetch(); };
 
@@ -646,6 +738,7 @@ class WeatherForm : Form
         {
             int i = 0;
             foreach (var p in c.AllPlaces()) got[p.Key] = Weather.Demo(i++);
+            air[c.Main.Key] = new AirQ { Aqi = 38, Pm25 = 9 };
         }
         else
             foreach (var p in c.AllPlaces())
@@ -738,7 +831,7 @@ class WeatherForm : Form
             WriteIndex();
             if (!c.HasPlace) BeginInvoke((Action)ChoosePlace);
             else if (Stale) Fetch();
-            else ScheduleFetchSeconds((int)Math.Max(5, c.Refresh * 60 - (DateTime.UtcNow - OldestFetch).TotalSeconds));
+            else { FetchAir(); ScheduleFetchSeconds((int)Math.Max(5, c.Refresh * 60 - (DateTime.UtcNow - OldestFetch).TotalSeconds)); }
         }
     }
 
@@ -814,6 +907,7 @@ class WeatherForm : Form
                         else errs[key] = r.Item4;
                     }
                     SaveCaches();
+                    FetchAir(); CheckAlerts();
                     var main = c.HasPlace ? c.Main.Key : "";
                     lastError = errs.ContainsKey(main) ? errs[main] : null;
                     // a place added while this ran gets its turn straight away
@@ -824,6 +918,31 @@ class WeatherForm : Form
             }
             catch { }
         });
+    }
+
+    // The main place's air quality, from Open-Meteo's air quality service. A place it has no data for just shows no tile.
+    void FetchAir()
+    {
+        if (Program.Demo || !c.ShowAir || !c.HasPlace) return;
+        var p = c.Main;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            AirQ a = null;
+            try { a = Weather.ParseAir(Weather.Get(Weather.AirUrl(p.Lat, p.Lon))); } catch { }
+            try { BeginInvoke((Action)(() => { if (a != null) air[p.Key] = a; Render(); })); } catch { }
+        });
+    }
+
+    // "Rain in about 20 minutes", once per spell of rain: the same rain is not announced again within 90 minutes.
+    void CheckAlerts()
+    {
+        var f = data;
+        if (Program.Demo || !c.RainAlert || f == null || (DateTime.UtcNow - f.Fetched).TotalMinutes > 120) return;
+        DateTime start;
+        int mins = Weather.RainSoon(f, out start);
+        if (mins < 0 || Math.Abs((start - rainAlerted).TotalMinutes) < 90) return;
+        rainAlerted = start;
+        tray.ShowBalloonTip(8000, mins <= 1 ? "Rain starting now" : "Rain in about " + mins + " minutes", c.Place == "" ? "Kinetik Weather" : c.Place, ToolTipIcon.None);
     }
 
     // The main place's forecast goes to forecast.json (Kinetik Screen reads it); the others go beside it, listed in places.tsv.
@@ -908,7 +1027,7 @@ class WeatherForm : Form
     void OpenMap()
     {
         if (!c.HasPlace) { ChoosePlace(); return; }
-        try { System.Diagnostics.Process.Start("https://www.windy.com/" + c.Lat + "/" + c.Lon + "/radar?radar," + c.Lat + "," + c.Lon + ",8"); } catch { }
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://www.windy.com/" + c.Lat + "/" + c.Lon + "/radar?radar," + c.Lat + "," + c.Lon + ",8") { UseShellExecute = true }); } catch { }
     }
 
     Point Snap(Point p)
@@ -996,7 +1115,7 @@ class WeatherForm : Form
 
     // ---- layout: every block's height (at 100%), so the card is sized before it's drawn
     const float HeaderH = 24, HeroH = 96, ChipsH = 50, IconsH = 24, CurveH = 54, LabelsH = 16, RainLineH = 20, RainOnlyH = 26,
-                SunH = 50, DayRowH = 26, RowH = 60, Gap = 10, TilePad = 10;
+                SunH = 50, DayRowH = 26, RowH = 60, Gap = 10, TilePad = 10, BannerH = 26, BannerGap = 6;
 
     bool Detailed { get { return c.View != 2; } }
     List<Place> Rows { get { var all = c.AllPlaces(); return c.View == 2 ? all : c.View == 1 ? all.Skip(1).ToList() : new List<Place>(); } }
@@ -1020,6 +1139,7 @@ class WeatherForm : Form
             if (f == null) h += 48;
             else
             {
+                if (Alerts(f).Count > 0) h += BannerH + BannerGap;
                 h += HeroH;
                 if (c.ShowDetails) h += Gap + ChipsH;
                 if ((c.ShowHourly || c.ShowRain) && ShownHours(f, c.Hours).Count > 0) h += Gap + HourlyTileH();
@@ -1216,6 +1336,8 @@ class WeatherForm : Form
             }
             else if (Detailed)
             {
+                var alerts = Alerts(f);
+                if (alerts.Count > 0) { PaintBanner(g, th, text, f, alerts, new RectangleF(x, y, w, BannerH * u)); y += (BannerH + BannerGap) * u; }
                 PaintHero(g, th, text, sub, f, x, y, w);
                 y += HeroH * u;
                 if (c.ShowDetails) { y += Gap * u; PaintChips(g, th, text, sub, f, x, y, w); y += ChipsH * u; }
@@ -1304,12 +1426,13 @@ class WeatherForm : Form
     {
         float isz = 78 * u;
         WxIcon.Paint(g, new RectangleF(x + w - isz + 4 * u, y + 2 * u, isz, isz), f.Code, f.IsDay, th.Light);
-        var t = Temp(f.Temp);
+        var t = Temp(c.FeelsHero ? f.Feels : f.Temp);
         g.DrawString(t, Big(40), text, new RectangleF(x - 4 * u, y - 2 * u, w - isz, 62 * u), fmtL);
         var today = TodayOf(f);
         g.DrawString(Weather.Describe(f.Code, f.IsDay), F(11.5f, FontStyle.Bold), text, new RectangleF(x, y + 60 * u, w - 8 * u, 18 * u), fmtL);
         string hl = today != null ? "H " + Temp(today.Max) + "   L " + Temp(today.Min) : "";
-        if (!c.ShowDetails) hl += (hl != "" ? "   ·   " : "") + "Feels " + Temp(f.Feels);
+        if (c.FeelsHero) hl = "Feels like  ·  actual " + Temp(f.Temp) + (hl != "" ? "   ·   " + hl : "");
+        else if (!c.ShowDetails) hl += (hl != "" ? "   ·   " : "") + "Feels " + Temp(f.Feels);
         if (TimeZoneDiffers(f)) hl += (hl != "" ? "   ·   " : "") + ClockText(f.PlaceNow) + " there";
         g.DrawString(hl, F(9), sub, new RectangleF(x, y + 78 * u, w, 17 * u), fmtL);
     }
@@ -1320,19 +1443,24 @@ class WeatherForm : Form
     void PaintChips(Graphics g, Theme th, Brush text, Brush sub, Forecast f, float x, float y, float w)
     {
         var today = TodayOf(f);
-        float gap = 6 * u, cw = (w - gap * 3) / 4, h = ChipsH * u;
+        float gap = 6 * u, h = ChipsH * u;
         bool uv = today != null && !double.IsNaN(today.Uv);
+        AirQ aq;
+        bool hasAir = c.ShowAir && c.HasPlace && air.TryGetValue(c.Main.Key, out aq) && !double.IsNaN(aq.Aqi);
+        if (hasAir) aq = air[c.Main.Key]; else aq = null;
         // label (and a shorter one for when it doesn't fit), value, and a unit drawn small after the value
         var wind = WindText(f.Wind).Split(' ');
-        var items = new[]
+        var items = new List<string[]>
         {
-            new[] { "Feels like", "Feels", Temp(f.Feels), "" },
+            c.FeelsHero ? new[] { "Actual", "Actual", Temp(f.Temp), "" } : new[] { "Feels like", "Feels", Temp(f.Feels), "" },
             new[] { "Wind " + Weather.Compass(f.WindDir), Weather.Compass(f.WindDir), wind[0], wind.Length > 1 ? wind[1] : "" },
             new[] { "Humidity", "Humid.", double.IsNaN(f.Humidity) ? "–" : Math.Round(f.Humidity).ToString("0"), double.IsNaN(f.Humidity) ? "" : "%" },
             uv ? new[] { "UV index", "UV", Math.Round(today.Uv).ToString("0"), UvWord(today.Uv) }
                : new[] { "Rain today", "Rain", today == null || double.IsNaN(today.Pop) ? "–" : Math.Round(today.Pop).ToString("0"), "%" },
         };
-        for (int i = 0; i < items.Length; i++)
+        if (aq != null) items.Add(new[] { "Air quality", "Air", Math.Round(aq.Aqi).ToString("0"), "" }); // the band is a coloured dot: the tile is narrow
+        float cw = (w - gap * (items.Count - 1)) / items.Count;
+        for (int i = 0; i < items.Count; i++)
         {
             var r = new RectangleF(x + i * (cw + gap), y, cw, h);
             Tile(g, th, r);
@@ -1345,12 +1473,53 @@ class WeatherForm : Form
                 Arrow(g, th.Text, vx + 5 * u, r.Y + 33 * u, 5.5f * u, (float)f.WindDir + 180);
                 vx += 13 * u;
             }
+            if (aq != null && i == items.Count - 1)
+                using (var b = new SolidBrush(Weather.AqiColour(aq.Aqi))) g.FillEllipse(b, r.Right - 14 * u, r.Y + 10 * u, 6 * u, 6 * u);
             var vf = F(10.5f, FontStyle.Bold);
             float vw = g.MeasureString(items[i][2], vf, 400, fmtL).Width - 1 * u;
             g.DrawString(items[i][2], vf, text, new RectangleF(vx, r.Y + 23 * u, r.Right - vx - 4 * u, 20 * u), fmtL);
             if (items[i][3] != "" && vx + vw < r.Right - 8 * u)
                 g.DrawString(items[i][3], F(7.5f), sub, new RectangleF(vx + vw, r.Y + 25 * u, r.Right - vx - vw - 2 * u, 18 * u), fmtL);
         }
+    }
+
+    List<Warn> Alerts(Forecast f) { return c.ShowWarnings && f != null ? Weather.Warnings(f) : new List<Warn>(); }
+
+    string WarnText(Warn w, Forecast f)
+    {
+        string day = w.When.Date == f.PlaceNow.Date ? "today" : "tomorrow";
+        switch (w.Kind)
+        {
+            case "storm": return (w.Level == 2 ? "Severe thunderstorms" : "Thunderstorms") + " around " + HourText(w.When);
+            case "rain": return "Heavy rain around " + HourText(w.When) + " · " + Math.Round(w.Value) + " mm/h";
+            case "wind": return (w.Level == 2 ? "Damaging winds" : "Strong winds") + " around " + HourText(w.When) + " · gusts " + WindText(w.Value);
+            case "snow": return "Heavy snow around " + HourText(w.When);
+            case "ice": return "Freezing rain around " + HourText(w.When);
+            case "heat": return (w.Level == 2 ? "Extreme heat " : "Very hot ") + day + " · up to " + Temp(w.Value);
+            default: return (w.Level == 2 ? "Extreme cold " : "Very cold ") + day + " · down to " + Temp(w.Value);
+        }
+    }
+
+    // A strip under the header for the worst alert, amber or red, with "+2" when there are more.
+    void PaintBanner(Graphics g, Theme th, Brush text, Forecast f, List<Warn> alerts, RectangleF r)
+    {
+        var col = alerts[0].Level == 2 ? Color.FromArgb(235, 72, 72) : Color.FromArgb(255, 170, 60);
+        if (th.Term) col = th.Text;
+        using (var p = Draw.Round(r, (th.Term ? 3 : 9) * u))
+        {
+            using (var b = new SolidBrush(Color.FromArgb(th.Light ? 40 : 46, col))) g.FillPath(b, p);
+            using (var pen = new Pen(Color.FromArgb(110, col), Math.Max(1, u))) g.DrawPath(pen, p);
+        }
+        float s = 12 * u, ix = r.X + 9 * u, iy = r.Y + (r.Height - s) / 2;
+        using (var tri = new GraphicsPath())
+        {
+            tri.AddPolygon(new[] { new PointF(ix + s / 2, iy), new PointF(ix + s, iy + s), new PointF(ix, iy + s) });
+            using (var b = new SolidBrush(col)) g.FillPath(b, tri);
+        }
+        using (var b = new SolidBrush(th.Bg)) g.FillRectangle(b, ix + s / 2 - 0.7f * u, iy + s * 0.35f, 1.4f * u, s * 0.35f);
+        using (var b = new SolidBrush(th.Bg)) g.FillRectangle(b, ix + s / 2 - 0.7f * u, iy + s * 0.78f, 1.4f * u, 1.4f * u);
+        string msg = WarnText(alerts[0], f) + (alerts.Count > 1 ? "   +" + (alerts.Count - 1) : "");
+        g.DrawString(msg, F(9, FontStyle.Bold), text, new RectangleF(ix + s + 8 * u, r.Y, r.Right - ix - s - 14 * u, r.Height), fmtL);
     }
 
     static string UvWord(double uv) { return uv < 3 ? "Low" : uv < 6 ? "Mod" : uv < 8 ? "High" : uv < 11 ? "V.high" : "Extr"; }
@@ -1679,14 +1848,19 @@ class WeatherForm : Form
                 b.Switch("Chance of rain", null, c.ShowRain, v => { c.ShowRain = v; Changed(); });
                 b.Switch("Sunrise and sunset", null, c.ShowSun, v => { c.ShowSun = v; Changed(); });
                 b.Switch("Days ahead", null, c.ShowDaily, v => { c.ShowDaily = v; Changed(); });
+                b.Switch("Air quality", "US air quality index, from Open-Meteo", c.ShowAir, v => { c.ShowAir = v; if (v) FetchAir(); Changed(); });
+                b.Switch("Forecast alerts", "A banner for storms, heavy rain, strong wind and extreme heat or cold in the next day. Worked out from the forecast, not official warnings", c.ShowWarnings, v => { c.ShowWarnings = v; Changed(); });
                 b.Switch("Animated icons", "Rain falls, the sun turns, clouds drift", c.Animate, v => { c.Animate = v; Changed(); });
                 var hours = new[] { 6, 8, 12, 24 }; var days = new[] { 3, 5, 7 };
                 b.Choice("Hours ahead", "24 shows every other hour", hours.Select(v => v + " hours").ToArray(), Array.IndexOf(hours, c.Hours), i => { c.Hours = hours[i]; Changed(); }, 140);
                 b.Choice("Days ahead", null, days.Select(v => v + " days").ToArray(), Array.IndexOf(days, c.Days), i => { c.Days = days[i]; Changed(); }, 140);
                 b.Section("Units");
                 b.Choice("Temperature", null, new[] { "°C", "°F" }, c.Fahrenheit ? 1 : 0, i => { c.Fahrenheit = i == 1; Changed(); }, 120);
+                b.Choice("Big temperature", "What the large number shows", new[] { "Actual", "Feels like" }, c.FeelsHero ? 1 : 0, i => { c.FeelsHero = i == 1; Changed(); }, 140);
                 b.Choice("Wind speed", null, new[] { "km/h", "mph", "m/s" }, c.Wind, i => { c.Wind = i; Changed(); }, 120);
                 b.Switch("24-hour time", null, c.Use24h, v => { c.Use24h = v; Changed(); });
+                b.Section("Alerts");
+                b.Switch("Rain in the next hour", "A notification when rain is about to start", c.RainAlert, v => { c.RainAlert = v; Changed(); });
                 b.Section("Updates");
                 var every = new[] { 15, 30, 60, 120 };
                 b.Choice("Update every", null, every.Select(v => v < 60 ? v + " minutes" : v / 60 + (v == 60 ? " hour" : " hours")).ToArray(), Array.IndexOf(every, c.Refresh), i =>
@@ -1737,7 +1911,7 @@ class WeatherForm : Form
         menu.Items.Add(Item(fetching ? "Updating…" : "Refresh now", false, Fetch));
         menu.Items[0].Enabled = !fetching && c.HasPlace && !Program.Demo;
         menu.Items.Add(Item("Open the radar map", false, OpenMap));
-        menu.Items.Add(Item("Weather data by Open-Meteo.com", false, () => { try { System.Diagnostics.Process.Start("https://open-meteo.com/"); } catch { } }));
+        menu.Items.Add(Item("Weather data by Open-Meteo.com", false, () => { try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://open-meteo.com/") { UseShellExecute = true }); } catch { } }));
         menu.Items.Add(new ToolStripSeparator());
 
         // Places: the main one first, then the others, each with its own options; then how many to show at once
@@ -1774,6 +1948,8 @@ class WeatherForm : Form
         show.DropDownItems.Add(Item("Chance of rain", c.ShowRain, () => { c.ShowRain = !c.ShowRain; Changed(); }));
         show.DropDownItems.Add(Item("Sunrise and sunset", c.ShowSun, () => { c.ShowSun = !c.ShowSun; Changed(); }));
         show.DropDownItems.Add(Item("Days ahead", c.ShowDaily, () => { c.ShowDaily = !c.ShowDaily; Changed(); }));
+        show.DropDownItems.Add(Item("Air quality", c.ShowAir, () => { c.ShowAir = !c.ShowAir; if (c.ShowAir) FetchAir(); Changed(); }));
+        show.DropDownItems.Add(Item("Forecast alerts", c.ShowWarnings, () => { c.ShowWarnings = !c.ShowWarnings; Changed(); }));
         show.DropDownItems.Add(Item("Animated icons", c.Animate, () => { c.Animate = !c.Animate; Changed(); }));
         show.DropDownItems.Add(new ToolStripSeparator());
         foreach (var n in new[] { 6, 8, 12, 24 }) { int v = n; show.DropDownItems.Add(Item("Next " + v + " hours" + (v == 24 ? " (every other hour)" : ""), c.Hours == v, () => { c.Hours = v; Changed(); })); }
@@ -1784,6 +1960,7 @@ class WeatherForm : Form
         var units = new ToolStripMenuItem("Units");
         units.DropDownItems.Add(Item("°C", !c.Fahrenheit, () => { c.Fahrenheit = false; Changed(); }));
         units.DropDownItems.Add(Item("°F", c.Fahrenheit, () => { c.Fahrenheit = true; Changed(); }));
+        units.DropDownItems.Add(Item("Feels-like temperature, big", c.FeelsHero, () => { c.FeelsHero = !c.FeelsHero; Changed(); }));
         units.DropDownItems.Add(new ToolStripSeparator());
         units.DropDownItems.Add(Item("km/h", c.Wind == 0, () => { c.Wind = 0; Changed(); }));
         units.DropDownItems.Add(Item("mph", c.Wind == 1, () => { c.Wind = 1; Changed(); }));
@@ -1880,6 +2057,7 @@ class WeatherForm : Form
             }
             else if (Program.Demo && !got.ContainsKey(p.Key)) got[p.Key] = Weather.Demo(got.Count);
         foreach (var p in c.AllPlaces()) errs.Remove(p.Key);
+        FetchAir();
         SaveCaches();
         lastError = null;
         if (c.AllPlaces().Any(p => !got.ContainsKey(p.Key)) || Stale) Fetch();

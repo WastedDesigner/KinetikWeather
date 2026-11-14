@@ -18,6 +18,13 @@ It's a small portable app with no installer. It's a companion to [Kinetik Stats]
 
 > **About this project:** I made this for my own desktop and decided to share it in case anyone else finds it useful. If you run into a bug or have an idea for a feature, please open an issue.
 
+## What's new in 2.1
+
+- **Rain in the next hour:** a notification when it's dry now and rain is due within the hour ("Rain in about 20 minutes"), once per spell of rain. It uses Open-Meteo's 15-minute rain, which is interpolated outside Europe, North America and Japan, so the timing is approximate.
+- **Forecast alerts:** a strip under the header for thunderstorms, heavy rain, strong or damaging winds, heavy snow, freezing rain, and extreme heat or cold in the next day. These are worked out from the forecast itself, not official warnings.
+- **Air quality:** a US air quality index tile, with a colour for the band (Open-Meteo's air quality service).
+- **Feels-like temperature:** choose whether the big number shows the actual or the feels-like temperature (Settings → Forecast → Units, or the right-click menu).
+
 ## What's new in 2.0
 
 Part of the Kinetik apps, with [Kinetik Stats](https://github.com/WastedDesigner/Kinetik) (the taskbar monitor, called just Kinetik until its v4.0), [Kinetik Hub](https://github.com/WastedDesigner/KinetikHub) and the other desktop widgets.
