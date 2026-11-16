@@ -64,11 +64,11 @@ Settings are kept in `HKCU\Software\KinetikWeather`, and the last forecasts in `
 
 ## Requirements
 
-Windows 10 or 11 (64-bit) with .NET Framework 4.8, which ships with both.
+Windows 10 or 11 (64-bit) with the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (x64).
 
 ## Building from source
 
-No SDK needed: `build.bat` compiles `KinetikWeather.cs` with the .NET Framework compiler that ships with Windows. `build.bat package` also makes `KinetikWeather.zip` for a release.
+Needs the .NET 8 SDK: `dotnet publish -c Release -p:PublishSingleFile=true -p:DebugType=none -o .` writes `KinetikWeather.exe` in this folder.
 
 `KinetikWeather.exe --demo` runs a separate copy with a made-up forecast (nothing is fetched) that reads and saves no settings. Add `--theme Light` (or any theme name) to pick its theme, `--view 0`, `1` or `2` for how its four made-up places are shown, `--place "-37.81,144.96"` to fetch a real place instead, and `--shot file.png` to draw the card into a PNG and quit, which is how the screenshots were made.
 
@@ -78,7 +78,7 @@ Weather data by [Open-Meteo.com](https://open-meteo.com/), under [CC BY 4.0](htt
 
 ## Tests and packaging
 
-`python tests/run-tests.py` runs the regression checks (no window opens). `build.bat package` builds the exe and makes the release zip, checking every file in it against its SHA-256 hash. The shared support code (`SuiteSupport.cs`) is compiled into the exe, so there's no extra DLL.
+`python tests/run-tests.py` runs the regression checks (no window opens). `powershell -File package.ps1 -App KinetikWeather` (after the publish above) makes the release zip, checking every file in it against its SHA-256 hash. The shared support code (`SuiteSupport.cs`) is compiled into the exe, so there's no extra DLL.
 
 ## License
 
