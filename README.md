@@ -64,11 +64,11 @@ Settings are kept in `HKCU\Software\KinetikWeather`, and the last forecasts in `
 
 ## Requirements
 
-Windows 10 or 11 (64-bit) with the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (x64).
+Windows 10 or 11 (64-bit) with the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (x64).
 
 ## Building from source
 
-Needs the .NET 8 SDK: `dotnet publish -c Release -p:PublishSingleFile=true -p:DebugType=none -o .` writes `KinetikWeather.exe` in this folder.
+Needs the .NET 10 SDK: `dotnet publish -c Release -p:PublishSingleFile=true -p:DebugType=none -o .` writes `KinetikWeather.exe` in this folder.
 
 `KinetikWeather.exe --demo` runs a separate copy with a made-up forecast (nothing is fetched) that reads and saves no settings. Add `--theme Light` (or any theme name) to pick its theme, `--view 0`, `1` or `2` for how its four made-up places are shown, `--place "-37.81,144.96"` to fetch a real place instead, and `--shot file.png` to draw the card into a PNG and quit, which is how the screenshots were made.
 
